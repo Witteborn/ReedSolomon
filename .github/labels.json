@@ -1,0 +1,62 @@
+[
+    {
+        "name": "Actions",
+        "color": "009800",
+        "description": "GitHub Actions"
+    },
+    {
+        "name": "Breaking change",
+        "color": "b60205",
+        "description": "This will break compatibility"
+    },
+    {
+        "name": "Bug",
+        "color": "ee0701",
+        "description": "Something isn't working"
+    },
+    {
+        "name": "Documentation",
+        "color": "d4c5f9",
+        "description": "Improvements or additions to documentation"
+    },
+    {
+        "name": "Feature",
+        "color": "84b6eb",
+        "description": "Request for a new feature"
+    },
+    {
+        "name": "Good first issue",
+        "color": "7057ff",
+        "description": "Good for newcomers"
+    },
+    {
+        "name": "Help wanted",
+        "color": "008672",
+        "description": "Extra attention is needed"
+    },
+    {
+        "name": "Improvement",
+        "color": "207de5",
+        "description": "Improvement of an existing feature"
+    },
+    {
+        "name": "Operative",
+        "color": "f9d0c4",
+        "description": "Operational tasks like creating issues"
+    },
+    {
+        "name": "Question",
+        "color": "d876e3",
+        "description": "Further information is requested"
+    },
+    {
+        "name": "Security",
+        "color": "6D054A",
+        "description": "Security related issue"
+    },
+    {
+        "name": "Up for Grabs",
+        "color": "45F5F1",
+        "description": "Feel free to work on this task"
+    }
+]
