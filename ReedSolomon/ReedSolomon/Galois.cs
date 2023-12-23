@@ -18,6 +18,7 @@ public class Galois
     /// The number of elements in the field.
     /// </summary>
     public const int FIELD_SIZE = 256;
+
     /// <summary>
     /// The polynomial used to generate the logarithm table.
     ///
@@ -32,7 +33,6 @@ public class Galois
 
     private static short[] LOG_TABLE => GaloisTables.LOG_TABLE;
     private static sbyte[] EXP_TABLE => GaloisTables.EXP_TABLE;
-
 
     /// <summary>
     /// Adds two elements of the field.  If you're in an inner loop,
@@ -75,7 +75,6 @@ public class Galois
         int logB = LOG_TABLE[b & 0xFF];
         int logResult = logA + logB;
         return EXP_TABLE[logResult];
-
     }
 
     /// <summary>

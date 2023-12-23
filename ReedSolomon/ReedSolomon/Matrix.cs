@@ -14,6 +14,7 @@ public class Matrix
     /// The number of rows in the matrix.
     /// </summary>
     private int Rows { get; set; }
+
     /// <summary>
     /// The number of columns in the matrix.
     /// </summary>
@@ -45,30 +46,29 @@ public class Matrix
         }
     }
 
-		///// <summary>
-		///// Initializes a matrix with the given row-major data.
-		///// </summary>
-		///// <param name="data"></param>
-		///// <exception cref="ArgumentException"></exception>
-		//public Matrix(byte[][] data) : this(
-//      Array.ConvertAll(
-//          Array.ConvertAll(
-//              data,
-//              array => unchecked((sbyte[])array)),
-//          b => unchecked((sbyte)b
-//          )
-//          )
-//          )
-		//{
-			
-		//}
+    ///// <summary>
+    ///// Initializes a matrix with the given row-major data.
+    ///// </summary>
+    ///// <param name="data"></param>
+    ///// <exception cref="ArgumentException"></exception>
+    //public Matrix(byte[][] data) : this(
+    //      Array.ConvertAll(
+    //          Array.ConvertAll(
+    //              data,
+    //              array => unchecked((sbyte[])array)),
+    //          b => unchecked((sbyte)b
+    //          )
+    //          )
+    //          )
+    //{
+    //}
 
-		/// <summary>
-		/// Initializes a matrix with the given row-major data.
-		/// </summary>
-		/// <param name="data"></param>
-		/// <exception cref="ArgumentException"></exception>
-		public Matrix(sbyte[][] data)
+    /// <summary>
+    /// Initializes a matrix with the given row-major data.
+    /// </summary>
+    /// <param name="data"></param>
+    /// <exception cref="ArgumentException"></exception>
+    public Matrix(sbyte[][] data)
     {
         Rows = data.Length;
         Columns = data[0].Length;
@@ -132,7 +132,6 @@ public class Matrix
         result.Append(']');
         return result.ToString();
     }
-
 
     /// <summary>
     /// Returns a human-readable string of the matrix contents. <br/>
@@ -233,7 +232,7 @@ public class Matrix
         if (Columns != right.Rows)
         {
             throw new ArgumentException(
-                    "Columns on left (" + Columns +") " +
+                    "Columns on left (" + Columns + ") " +
                     "is different than rows on right (" + right.Rows + ")");
         }
         Matrix result = new Matrix(Rows, right.Columns);
@@ -425,10 +424,8 @@ public class Matrix
                     {
                         Data[rowAbove][c] ^= Galois.Multiply(scale, Data[d][c]);
                     }
-
                 }
             }
         }
     }
-
 }

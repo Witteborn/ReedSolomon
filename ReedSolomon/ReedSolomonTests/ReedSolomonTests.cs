@@ -27,11 +27,8 @@ namespace ReedSolomonTests
 
             var shards = shardsList.ToArray();
 
-
             //Act
             rs.EncodeParity(shards, 0, data.Length / 4);
-
-
 
             //Assert
             sbyte[][] expectedShards =
@@ -67,11 +64,9 @@ namespace ReedSolomonTests
                 [20, 21, 22, 23]
             ];
 
-
             bool[] shardPresent = [true, false, true, true, true, true];
             //Act
             rs.DecodeMissing(shards, shardPresent, 0, shards[0].Length);
-
 
             //Assert
 
@@ -109,11 +104,9 @@ namespace ReedSolomonTests
                 [20, 21, 22, 23]
             ];
 
-
             bool[] shardPresent = [true, false, true, false, true, true];
             //Act
             rs.DecodeMissing(shards, shardPresent, 0, shards[0].Length);
-
 
             //Assert
 
@@ -150,11 +143,9 @@ namespace ReedSolomonTests
                 [20, 21, 22, 23]
             ];
 
-
             bool[] shardPresent = [true, true, true, true, false, true];
             //Act
             rs.DecodeMissing(shards, shardPresent, 0, shards[0].Length);
-
 
             //Assert
 
@@ -192,11 +183,9 @@ namespace ReedSolomonTests
                 [0, 0, 0, 0]
             ];
 
-
             bool[] shardPresent = [true, true, true, true, false, false];
             //Act
             rs.DecodeMissing(shards, shardPresent, 0, shards[0].Length);
-
 
             //Assert
 
@@ -216,7 +205,6 @@ namespace ReedSolomonTests
             }
         }
 
-
         [TestMethod()]
         public void DecodeMissing_All_Failure_Test()
         {
@@ -234,11 +222,9 @@ namespace ReedSolomonTests
                 [0, 0, 0, 0]
             ];
 
-
             bool[] shardPresent = [false, false, false, false, false, false];
             //Act
             var ex = Assert.ThrowsException<ArgumentException>(() => rs.DecodeMissing(shards, shardPresent, 0, shards[0].Length));
-
 
             //Assert
             Assert.AreEqual("Not enough shards present", ex.Message);

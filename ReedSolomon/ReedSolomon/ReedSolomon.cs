@@ -29,7 +29,6 @@ public class ReedSolomon
         }
     }
 
-
     /// <summary>
     /// Encodes parity for a set of data shards.
     /// </summary>
@@ -40,7 +39,6 @@ public class ReedSolomon
     /// <param name="byteCount">The number of  sbytes to encode in each shard.</param>
     public void EncodeParity(sbyte[][] shards, int offset, int byteCount)
     {
-
         // Check arguments.
         CheckBuffersAndSizes(shards, offset, byteCount);
 
@@ -66,7 +64,6 @@ public class ReedSolomon
     /// <returns></returns>
     public bool IsParityCorrect(sbyte[][] shards, int firstByte, int byteCount)
     {
-
         // Check arguments.
         CheckBuffersAndSizes(shards, firstByte, byteCount);
 
@@ -198,7 +195,6 @@ public class ReedSolomon
         CodeSomeShards(matrixRows, shards, outputs, outputCount, offset, byteCount);
     }
 
-
     /// <summary>
     /// Checks the consistency of arguments passed to public methods.
     /// </summary>
@@ -208,7 +204,6 @@ public class ReedSolomon
     /// <exception cref="NotImplementedException"></exception>
     private void CheckBuffersAndSizes(sbyte[][] shards, int offset, int byteCount)
     {
-
         // The number of buffers should be equal to the number of
         // data shards plus the number of parity shards.
         if (shards.Length != this.TotalShardCount)
@@ -268,7 +263,6 @@ public class ReedSolomon
                             int offset,
                             int byteCount)
     {
-
         // This is the inner loop.  It needs to be fast.  Be careful
         // if you change it.
         //
@@ -327,7 +321,6 @@ public class ReedSolomon
                                 int offset,
                                 int byteCount)
     {
-
         // This is the inner loop.  It needs to be fast.  Be careful
         // if you change it.
         //
@@ -406,5 +399,4 @@ public class ReedSolomon
         }
         return result;
     }
-
 }
