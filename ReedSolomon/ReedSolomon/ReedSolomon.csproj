@@ -1,18 +1,18 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
+	<PropertyGroup>
+		<TargetFramework>net8.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
 
-	<PackageOutputPath>./nupkg</PackageOutputPath>
-	<Authors>Witteborn</Authors>
-	<Description>Platzhalter</Description>
-	<PackageProjectUrl>https://github.com/Witteborn/ReedSolomon</PackageProjectUrl>
-	<RepositoryUrl>https://github.com/Witteborn/ReedSolomon</RepositoryUrl>
-	<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
+		<PackageOutputPath>./nupkg</PackageOutputPath>
+		<Authors>Witteborn</Authors>
+		<Description>C# .NET implementation of the ReedSolomon algorithm</Description>
+		<PackageProjectUrl>https://github.com/Witteborn/ReedSolomon</PackageProjectUrl>
+		<RepositoryUrl>https://github.com/Witteborn/ReedSolomon</RepositoryUrl>
+		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 
-	<Copyright>Witteborn</Copyright>
-  </PropertyGroup>
+		<Copyright>Witteborn</Copyright>
+	</PropertyGroup>
 
 </Project>
