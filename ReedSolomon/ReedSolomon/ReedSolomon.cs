@@ -1,4 +1,7 @@
-﻿namespace Witteborn.ReedSolomon;
+﻿using System.Collections.Generic;
+using System.Data.SqlTypes;
+
+namespace Witteborn.ReedSolomon;
 
 /// <summary>
 ///  Reed-Solomon Coding over 8-bit values.
@@ -26,6 +29,173 @@ public class ReedSolomon
         for (int i = 0; i < parityShardCount; i++)
         {
             this.ParityRows[i] = this.Matrix.GetRow(dataShardCount + i);
+        }
+    }
+
+
+    /// <summary>
+    /// This produces a total amount of shards of dataShards + parityShard.
+    /// The Shards are already encoded. Note that the result will be bigger than the data input because of the parity shards being added.
+    /// </summary>
+    /// <param name="data"></param>
+    /// <param name="dataShards"></param>
+    /// <param name="parityShards"></param>
+    /// <returns></returns>
+    public byte[][] ManagedEncode(byte[] data, int dataShards, int parityShards)
+    {
+        sbyte[] sbyteData = Array.ConvertAll(data, b => unchecked((sbyte)b));
+        var encodedShards = ManagedEncode(sbyteData, dataShards, parityShards);
+
+        var result = new List<byte[]>();
+
+        for (int i = 0; i < encodedShards.Length; i++)
+        {
+            var shard = encodedShards[i];
+            byte[] rawShard = Array.ConvertAll(shard, b => unchecked((byte)b));
+            result.Add(rawShard);
+        }
+
+        return result.ToArray();
+    }
+
+    /// <summary>
+    /// This produces a total amount of shards of dataShards + parityShard.
+    /// The Shards are already encoded. Note that the result will be bigger than the data input because of the parity shards being added.
+    /// </summary>
+    /// <param name="data"></param>
+    /// <param name="dataShards"></param>
+    /// <param name="parityShards"></param>
+    /// <returns></returns>
+    public sbyte[][] ManagedEncode(sbyte[] data, int dataShards, int parityShards)
+    {
+        int totalShards = dataShards + parityShards;
+
+        int shardSize = (int)Math.Ceiling((double)data.Length / dataShards);
+        int totalDataSize = shardSize * dataShards;
+
+        if (totalDataSize > data.Length)
+        {
+            Array.Resize(ref data, totalDataSize);
+        }
+
+        var rs = new ReedSolomon(dataShards, parityShards);
+        var shardsList = new List<sbyte[]>();
+
+        for (int i = 0; i < dataShards; i++)
+        {
+            sbyte[] shardData = new sbyte[shardSize];
+            Array.Copy(data, i * shardSize, shardData, 0, shardSize);
+            shardsList.Add(shardData);
+        }
+
+        for (int i = dataShards; i < totalShards; i++)
+        {
+            shardsList.Add(new sbyte[shardSize]);
+        }
+        var shards = shardsList.ToArray();
+        rs.EncodeParity(shards, 0, shardSize);
+
+        return shards.ToArray();
+    }
+
+    /// <summary>
+    /// This produces a total amount of shards of dataShards + parityShard.
+    /// The Shards are already encoded. Note that the result will be bigger than the data input because of the parity shards being added.
+    /// </summary>
+    /// <param name="data"></param>
+    /// <param name="dataShards"></param>
+    /// <param name="parityShards"></param>
+    /// <returns></returns>
+    public byte[] ManagedDecode(byte[][] data, int dataShards, int parityShards)
+    {
+        int size = 0;
+
+        sbyte[][] sbytes = new sbyte[data.Length][];
+        for (int i = 0; i < data.Length; i++)
+        {
+            if (size == 0) {
+                if (data[i] != null) { 
+                    size = data[i].Length;
+                }
+            }
+
+            if (data[i] == null) {
+                data[i] = new byte[size];
+            }
+
+            sbytes[i] = Array.ConvertAll(data[i], b => unchecked((sbyte)b));
+        }
+
+        var result = ManagedDecode(sbytes, dataShards, parityShards);
+        return Array.ConvertAll(result, b => unchecked((byte)b));
+    }
+
+    /// <summary>
+    /// This produces a total amount of shards of dataShards + parityShard.
+    /// The Shards are already encoded. Note that the result will be bigger than the data input because of the parity shards being added.
+    /// </summary>
+    /// <param name="data"></param>
+    /// <param name="dataShards"></param>
+    /// <param name="parityShards"></param>
+    /// <returns></returns>
+    public sbyte[] ManagedDecode(sbyte[][] data, int dataShards, int parityShards)
+    {
+        ReedSolomon rs = new ReedSolomon(dataShards, parityShards);
+        int totalShards = dataShards + parityShards;
+        int shardSize = data[0].Length;
+        bool[] shardPresent = new bool[totalShards];
+
+        for (int i = 0; i < data.Length; i++)
+        {
+            //if any shard is null, create a new array
+            if (data[i] == null || data[i].All(d => d == 0))
+            {
+                data[i] = new sbyte[shardSize];
+                shardPresent[i] = false;
+            }
+            else
+            {
+                shardPresent[i] = true;
+            }
+        }
+
+        bool atleastOneShardIsMissing = shardPresent.Any(b => b == false);
+        if (atleastOneShardIsMissing)
+        {
+            rs.DecodeMissing(data, shardPresent, 0, data[0].Length);
+        }
+
+        var output = new List<sbyte>();
+        for (int i = 0; i < dataShards; i++)
+        {
+            output.AddRange(data[i]);
+        }
+
+        var outputArray = output.ToArray();
+        return outputArray;
+    }
+
+    /// <summary>
+    /// Encodes parity for a set of data shards. Note that this is slower than using the sbytes directly
+    /// </summary>
+    /// <param name="shards">An array containing data shards followed by parity shards. <br/>
+    /// Each shard is a byte array, and they must all be the same size
+    /// .</param>
+    /// <param name="offset">The index of the first  sbyte in each shard to encode.</param>
+    /// <param name="byteCount">The number of  sbytes to encode in each shard.</param>
+    public void EncodeParity(byte[][] shards, int offset, int byteCount)
+    {
+        sbyte[][] sbytes = new sbyte[shards.Length][];
+        for (int i = 0; i < shards.Length; i++)
+        {
+            sbytes[i] = Array.ConvertAll(shards[i], b => unchecked((sbyte)b));
+        }
+
+        EncodeParity(sbytes, offset, byteCount);
+
+        for (int i = 0; i < shards.Length; i++)
+        {
+            shards[i] = Array.ConvertAll(sbytes[i], b => unchecked((byte)b));
         }
     }
 
