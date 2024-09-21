@@ -7,7 +7,7 @@ assignees: ''
 
 ---
 
-## Descripe
+## Describe
 
 ### Tasks
 
