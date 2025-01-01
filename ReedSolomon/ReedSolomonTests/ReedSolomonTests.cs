@@ -34,6 +34,63 @@ namespace ReedSolomonTests
         }
 
         [TestMethod()]
+        public void EncodeEmptyDataTest()
+        {
+            //Arrange
+            ReedSolomon rs = new ReedSolomon(dataShardCount: 4, parityShardCount: 2);
+
+            sbyte[] data = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+            var shards = rs.ManagedEncode(data, 4, 2);
+
+            //Assert
+            sbyte[][] expectedShards =
+            [
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0]
+            ];
+
+            for (int i = 0; i < shards.Length; i++)
+            {
+                Assert.IsTrue(shards[i].SequenceEqual(expectedShards[i]));
+            }
+        }
+
+        [TestMethod()]
+        public void DecodeEmptySuccess_Test()
+        {
+            //Arrange
+            ReedSolomon rs = new ReedSolomon(dataShardCount: 4, parityShardCount: 2);
+
+            sbyte[][] shards =
+            [
+                [0, 0, 0, 0],   //Data
+                [0, 0, 0, 0],   //Missing Data
+                [0, 0, 0, 0],   //Data
+                [0, 0, 0, 0],   //Data
+                [0, 0, 0, 0],   //Parity
+                [0, 0, 0, 0]    //Parity
+            ];
+
+
+            //Act
+            var result = rs.ManagedDecode(shards, 4, 2, allowAllZeroes: true);
+
+            //Assert
+            sbyte[] expected =
+               [0, 0, 0, 0,     //Data
+                0, 0, 0, 0,     //Data
+                0, 0, 0, 0,     //Data
+                0, 0, 0, 0];    //Data
+
+            Assert.IsTrue(result.SequenceEqual(expected));
+        }
+
+        [TestMethod()]
         public void ProduceEncodedShardsTest2()
         {
             //Arrange
