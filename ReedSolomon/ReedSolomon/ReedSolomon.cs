@@ -138,7 +138,7 @@ public class ReedSolomon
     /// <param name="dataShards"></param>
     /// <param name="parityShards"></param>
     /// <returns></returns>
-    public sbyte[] ManagedDecode(sbyte[][] data, int dataShards, int parityShards)
+    public sbyte[] ManagedDecode(sbyte[][] data, int dataShards, int parityShards, bool allowAllZeroes = false)
     {
         ReedSolomon rs = new ReedSolomon(dataShards, parityShards);
         int totalShards = dataShards + parityShards;
@@ -148,7 +148,7 @@ public class ReedSolomon
         for (int i = 0; i < data.Length; i++)
         {
             //if any shard is null, create a new array
-            if (data[i] == null || data[i].All(d => d == 0))
+            if (data[i] == null || (allowAllZeroes == false && data[i].All(d => d == 0)))
             {
                 data[i] = new sbyte[shardSize];
                 shardPresent[i] = false;
