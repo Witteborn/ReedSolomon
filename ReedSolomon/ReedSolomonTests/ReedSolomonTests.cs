@@ -7,6 +7,33 @@ namespace ReedSolomonTests
     public class ReedSolomonTests
     {
         [TestMethod()]
+        public void ProduceEncodedShardsWithPaddingTest()
+        {
+            //Arrange
+            ReedSolomon rs = new ReedSolomon(dataShardCount: 4, parityShardCount: 2);
+
+            sbyte[] data = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+
+            var shards = rs.ManagedEncode(data, 4, 2);
+
+            //Assert
+            sbyte[][] expectedShards =
+            [
+                [0, 1, 2, 3, 4],
+                [5, 6, 7, 8, 9 ],
+                [10, 11, 12, 13, 14],
+                [15, 16, 0, 0, 0], // the zeroes are padding
+                [20, -88, -70, 7, 108],
+                [17, -25, -119, 24, 107]
+            ];
+
+            for (int i = 0; i < shards.Length; i++)
+            {
+                Assert.IsTrue(shards[i].SequenceEqual(expectedShards[i]));
+            }
+        }
+
+        [TestMethod()]
         public void ProduceEncodedShardsTest()
         {
             //Arrange
@@ -200,6 +227,130 @@ namespace ReedSolomonTests
             {
                 Assert.IsTrue(shards[i].SequenceEqual(expectedShards[i]));
             }
+        }
+
+
+        [TestMethod()]
+        public void Decode_NoMissing_WithPadding_Success_Test()
+        {
+            //Arrange
+            ReedSolomon rs = new ReedSolomon(dataShardCount: 4, parityShardCount: 2);
+
+            sbyte[][] shards =
+            [
+                [0, 1, 2, 3, 4],
+                [5, 6, 7, 8, 9 ],
+                [10, 11, 12, 13, 14],
+                [15, 16, 0, 0, 0], // the zeroes are padding
+                [20, -88, -70, 7, 108], // Parity
+                [17, -25, -119, 24, 107] // Parity
+            ];
+
+
+            //Act
+            var result = rs.ManagedDecode(shards, 4, 2, paddingSize: 3);
+
+            //Assert
+            sbyte[] expected = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];    //Data
+
+            Assert.IsTrue(result.SequenceEqual(expected));
+        }
+
+        [TestMethod()]
+        public void Decode_NoMissing_WithPadding_Success_Test2()
+        {
+            //Arrange
+            ReedSolomon rs = new ReedSolomon(dataShardCount: 4, parityShardCount: 2);
+
+            sbyte[][] shards =
+            [
+                [0, 1, 2, 3, 4],
+                [5, 6, 7, 8, 9 ],
+                [10, 11, 12, 13, 14],
+                [15, 16, 0, 0, 0], // the zeroes are padding
+                [20, -88, -70, 7, 108], // Parity
+                [17, -25, -119, 24, 107] // Parity
+            ];
+
+
+            //Act
+            var result = rs.ManagedDecode(shards, paddingSize: 3);
+
+            //Assert
+            sbyte[] expected = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];    //Data
+
+            Assert.IsTrue(result.SequenceEqual(expected));
+        }
+
+        [TestMethod()]
+        public void Decode_OneMissing_WithPadding_Success_Test()
+        {
+            //Arrange
+            ReedSolomon rs = new ReedSolomon(dataShardCount: 4, parityShardCount: 2);
+
+            sbyte[][] shards =
+            [
+                [0, 1, 2, 3, 4],
+                null,
+                [10, 11, 12, 13, 14],
+                [15, 16, 0, 0, 0], // the zeroes are padding
+                [20, -88, -70, 7, 108], // Parity
+                [17, -25, -119, 24, 107] // Parity
+            ];
+
+
+            //Act
+            var result = rs.ManagedDecode(shards, 4, 2, paddingSize: 3);
+
+            //Assert
+            sbyte[] expected = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];    //Data
+
+            Assert.IsTrue(result.SequenceEqual(expected));
+        }
+
+        [TestMethod()]
+        public void Decode_OneMissing_WithPadding_Success_Test2()
+        {
+            //Arrange
+            ReedSolomon rs = new ReedSolomon(dataShardCount: 4, parityShardCount: 2);
+
+            sbyte[][] shards =
+            [
+                [0, 1, 2, 3, 4],
+                [0, 0, 0, 0, 0],
+                [10, 11, 12, 13, 14],
+                [15, 16, 0, 0, 0], // the zeroes are padding
+                [20, -88, -70, 7, 108], // Parity
+                [17, -25, -119, 24, 107] // Parity
+            ];
+
+
+            //Act
+            var result = rs.ManagedDecode(shards, 4, 2, paddingSize: 3);
+
+            //Assert
+            sbyte[] expected = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];    //Data
+
+            Assert.IsTrue(result.SequenceEqual(expected));
+        }
+
+        [TestMethod()]
+        public void EncodeAndDecode_OneMissing_WithPadding_Success_Test2()
+        {
+            //Arrange
+            ReedSolomon rs = new ReedSolomon(dataShardCount: 4, parityShardCount: 2);
+
+            sbyte[] data = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+            sbyte[] expected = data.ToArray();
+
+
+            //Act
+            var encoded = rs.ManagedEncode(data, 4, 2);
+            var paddingSize = rs.GetPaddingSize(data.Length, 4);
+            var decoded = rs.ManagedDecode(encoded, 4, 2, paddingSize: paddingSize);
+
+            //Assert
+            Assert.IsTrue(decoded.SequenceEqual(expected));
         }
 
         [TestMethod()]

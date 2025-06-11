@@ -23,8 +23,8 @@ Using the Reed-Solomon library is straightforward. Here's a simple example of ho
 ### Managed Example: Byte
 
 ```csharp
-Console.WriteLine("Managed Example Byte");
-Console.WriteLine("--------------------");
+Console.WriteLine("Managed Example SByte");
+Console.WriteLine("---------------------");
 const int dataShardCount = 4;
 const int parityShardCount = 2;
 
@@ -32,14 +32,17 @@ const int parityShardCount = 2;
 ReedSolomon rs = new ReedSolomon(dataShardCount, parityShardCount);
 
 // Example data to encode
-byte[] data = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+byte[] data = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
 Console.WriteLine("Data:");
 Console.WriteLine(string.Join(" ", data));
+var paddingSize = rs.GetPaddingSize(data.Length);
+Console.WriteLine("Padding size: " + paddingSize);
 
 // Encode the data using ManagedEncode to produce shards
-var shards = rs.ManagedEncode(data, dataShardCount, parityShardCount);
+var shards = rs.ManagedEncode(data);
 
 Console.WriteLine("Encoded Data:");
+
 foreach (var shard in shards)
 {
     Console.WriteLine(string.Join(" ", shard));
@@ -62,10 +65,11 @@ foreach (var shard in shards)
 }
 
 // Decode the remaining shards using ManagedDecode to recover original data
-var decodedData = rs.ManagedDecode(shards, dataShardCount, parityShardCount);
+var decodedData = rs.ManagedDecode(shards, paddingSize: paddingSize);
 
 Console.WriteLine("Decoded data:");
 Console.WriteLine(string.Join(" ", decodedData));
+
 ```
 
 ### Managed Example: SByte

@@ -26,12 +26,14 @@ void ManagedExample_SByte()
     ReedSolomon rs = new ReedSolomon(dataShardCount, parityShardCount);
 
     // Example data to encode
-    sbyte[] data = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    sbyte[] data = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
     Console.WriteLine("Data:");
     Console.WriteLine(string.Join(" ", data));
+    var paddingSize = rs.GetPaddingSize(data.Length);
+    Console.WriteLine("Padding size: " + paddingSize);
 
     // Encode the data using ManagedEncode to produce shards
-    var shards = rs.ManagedEncode(data, dataShardCount, parityShardCount);
+    var shards = rs.ManagedEncode(data);
 
     Console.WriteLine("Encoded Data:");
 
@@ -57,10 +59,12 @@ void ManagedExample_SByte()
     }
 
     // Decode the remaining shards using ManagedDecode to recover original data
-    var decodedData = rs.ManagedDecode(shards, dataShardCount, parityShardCount);
+    var decodedData = rs.ManagedDecode(shards, dataShardCount, parityShardCount, paddingSize: paddingSize);
 
     Console.WriteLine("Decoded data:");
     Console.WriteLine(string.Join(" ", decodedData));
+
+
 }
 
 void Example_SByte()

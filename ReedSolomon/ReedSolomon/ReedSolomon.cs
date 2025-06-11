@@ -38,6 +38,17 @@ public class ReedSolomon
     /// The Shards are already encoded. Note that the result will be bigger than the data input because of the parity shards being added.
     /// </summary>
     /// <param name="data"></param>
+    /// <returns></returns>
+    public byte[][] ManagedEncode(byte[] data)
+    {
+        return ManagedEncode(data, this.DataShardCount, this.ParityShardCount);
+    }
+
+    /// <summary>
+    /// This produces a total amount of shards of dataShards + parityShard.
+    /// The Shards are already encoded. Note that the result will be bigger than the data input because of the parity shards being added.
+    /// </summary>
+    /// <param name="data"></param>
     /// <param name="dataShards"></param>
     /// <param name="parityShards"></param>
     /// <returns></returns>
@@ -59,6 +70,43 @@ public class ReedSolomon
     }
 
     /// <summary>
+    /// This returns the expected amount of padding for this data.
+    /// </summary>
+    /// <param name="dataSize"></param>
+    /// <returns></returns>
+    public int GetPaddingSize(int dataSize)// Im very open for better solutions that make this obsolete or improve it in any way
+    {
+        return GetPaddingSize(dataSize, this.DataShardCount);
+    }
+
+    /// <summary>
+    /// This returns the expected amount of padding for this data.
+    /// </summary>
+    /// <param name="dataSize"></param>
+    /// <param name="dataShards"></param>
+    /// <returns></returns>
+    public int GetPaddingSize(int dataSize, int dataShards) // Im very open for better solutions that make this obsolete or improve it in any way
+    {
+        int shardSize = (int)Math.Ceiling((double)dataSize / dataShards);
+        int totalDataSize = shardSize * dataShards;
+        int paddingSize = totalDataSize - dataSize;
+        return paddingSize;
+    }
+
+    /// <summary>
+    /// This produces a total amount of shards of dataShards + parityShard.
+    /// The Shards are already encoded. Note that the result will be bigger than the data input because of the parity shards being added.
+    /// </summary>
+    /// <param name="data"></param>
+    /// <param name="dataShards"></param>
+    /// <param name="parityShards"></param>
+    /// <returns></returns>
+    public sbyte[][] ManagedEncode(sbyte[] data)
+    {
+        return ManagedEncode(data, this.DataShardCount, this.ParityShardCount);
+    }
+
+    /// <summary>
     /// This produces a total amount of shards of dataShards + parityShard.
     /// The Shards are already encoded. Note that the result will be bigger than the data input because of the parity shards being added.
     /// </summary>
@@ -72,8 +120,8 @@ public class ReedSolomon
 
         int shardSize = (int)Math.Ceiling((double)data.Length / dataShards);
         int totalDataSize = shardSize * dataShards;
-
-        if (totalDataSize > data.Length)
+        int paddingSize = totalDataSize - data.Length;
+        if (paddingSize > 0)
         {
             Array.Resize(ref data, totalDataSize);
         }
@@ -106,6 +154,19 @@ public class ReedSolomon
     /// <param name="dataShards"></param>
     /// <param name="parityShards"></param>
     /// <returns></returns>
+    public byte[] ManagedDecode(byte[][] data)
+    {
+        return ManagedDecode(data, this.DataShardCount, this.ParityShardCount);
+    }
+
+    /// <summary>
+    /// This produces a total amount of shards of dataShards + parityShard.
+    /// The Shards are already encoded. Note that the result will be bigger than the data input because of the parity shards being added.
+    /// </summary>
+    /// <param name="data"></param>
+    /// <param name="dataShards"></param>
+    /// <param name="parityShards"></param>
+    /// <returns></returns>
     public byte[] ManagedDecode(byte[][] data, int dataShards, int parityShards)
     {
         int size = 0;
@@ -113,13 +174,16 @@ public class ReedSolomon
         sbyte[][] sbytes = new sbyte[data.Length][];
         for (int i = 0; i < data.Length; i++)
         {
-            if (size == 0) {
-                if (data[i] != null) { 
+            if (size == 0)
+            {
+                if (data[i] != null)
+                {
                     size = data[i].Length;
                 }
             }
 
-            if (data[i] == null) {
+            if (data[i] == null)
+            {
                 data[i] = new byte[size];
             }
 
@@ -135,10 +199,21 @@ public class ReedSolomon
     /// The Shards are already encoded. Note that the result will be bigger than the data input because of the parity shards being added.
     /// </summary>
     /// <param name="data"></param>
+    /// <returns></returns>
+    public sbyte[] ManagedDecode(sbyte[][] data, bool allowAllZeroes = false, int paddingSize = 0)
+    {
+        return ManagedDecode(data, this.DataShardCount, this.ParityShardCount, allowAllZeroes, paddingSize);
+    }
+
+    /// <summary>
+    /// This produces a total amount of shards of dataShards + parityShard.
+    /// The Shards are already encoded. Note that the result will be bigger than the data input because of the parity shards being added.
+    /// </summary>
+    /// <param name="data"></param>
     /// <param name="dataShards"></param>
     /// <param name="parityShards"></param>
     /// <returns></returns>
-    public sbyte[] ManagedDecode(sbyte[][] data, int dataShards, int parityShards, bool allowAllZeroes = false)
+    public sbyte[] ManagedDecode(sbyte[][] data, int dataShards, int parityShards, bool allowAllZeroes = false, int paddingSize = 0)
     {
         ReedSolomon rs = new ReedSolomon(dataShards, parityShards);
         int totalShards = dataShards + parityShards;
@@ -171,7 +246,7 @@ public class ReedSolomon
             output.AddRange(data[i]);
         }
 
-        var outputArray = output.ToArray();
+        var outputArray = output.SkipLast(paddingSize).ToArray();
         return outputArray;
     }
 
