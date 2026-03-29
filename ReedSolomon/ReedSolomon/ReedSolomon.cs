@@ -1,8 +1,9 @@
-﻿using System.Collections.Generic;
-using System.Data.SqlTypes;
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
 
-namespace Witteborn.ReedSolomon;
-
+namespace Witteborn.ReedSolomon
+{
 /// <summary>
 ///  Reed-Solomon Coding over 8-bit values.
 /// </summary>
@@ -21,6 +22,19 @@ public class ReedSolomon
 
     public ReedSolomon(int dataShardCount, int parityShardCount)
     {
+        if (dataShardCount <= 0)
+        {
+            throw new ArgumentException("dataShardCount must be positive", nameof(dataShardCount));
+        }
+        if (parityShardCount <= 0)
+        {
+            throw new ArgumentException("parityShardCount must be positive", nameof(parityShardCount));
+        }
+        if (dataShardCount + parityShardCount > 256)
+        {
+            throw new ArgumentException("total shard count cannot exceed 256");
+        }
+
         this.DataShardCount = dataShardCount;
         this.ParityShardCount = parityShardCount;
         this.TotalShardCount = dataShardCount + parityShardCount;
@@ -74,7 +88,7 @@ public class ReedSolomon
     /// </summary>
     /// <param name="dataSize"></param>
     /// <returns></returns>
-    public int GetPaddingSize(int dataSize)// Im very open for better solutions that make this obsolete or improve it in any way
+    public int GetPaddingSize(int dataSize)
     {
         return GetPaddingSize(dataSize, this.DataShardCount);
     }
@@ -85,7 +99,7 @@ public class ReedSolomon
     /// <param name="dataSize"></param>
     /// <param name="dataShards"></param>
     /// <returns></returns>
-    public int GetPaddingSize(int dataSize, int dataShards) // Im very open for better solutions that make this obsolete or improve it in any way
+    public int GetPaddingSize(int dataSize, int dataShards)
     {
         int shardSize = (int)Math.Ceiling((double)dataSize / dataShards);
         int totalDataSize = shardSize * dataShards;
@@ -147,41 +161,41 @@ public class ReedSolomon
     }
 
     /// <summary>
-    /// This produces a total amount of shards of dataShards + parityShard.
-    /// The Shards are already encoded. Note that the result will be bigger than the data input because of the parity shards being added.
+    /// Decodes the given shards back into the original data. Missing or null shards are recovered
+    /// using the Reed-Solomon parity information. The padding added during encoding is removed.
     /// </summary>
-    /// <param name="data"></param>
-    /// <param name="dataShards"></param>
-    /// <param name="parityShards"></param>
-    /// <returns></returns>
-    public byte[] ManagedDecode(byte[][] data)
+    /// <param name="data">An array of shards (data shards followed by parity shards). Missing shards should be null.</param>
+    /// <param name="paddingSize">The number of padding bytes that were added during encoding.</param>
+    /// <returns>The decoded original data as a byte array.</returns>
+    public byte[] ManagedDecode(byte[][] data, int paddingSize = 0)
     {
-        return ManagedDecode(data, this.DataShardCount, this.ParityShardCount);
+        return ManagedDecode(data, this.DataShardCount, this.ParityShardCount, paddingSize);
     }
 
     /// <summary>
-    /// This produces a total amount of shards of dataShards + parityShard.
-    /// The Shards are already encoded. Note that the result will be bigger than the data input because of the parity shards being added.
+    /// Decodes the given shards back into the original data. Missing or null shards are recovered
+    /// using the Reed-Solomon parity information. The padding added during encoding is removed.
     /// </summary>
-    /// <param name="data"></param>
-    /// <param name="dataShards"></param>
-    /// <param name="parityShards"></param>
-    /// <returns></returns>
-    public byte[] ManagedDecode(byte[][] data, int dataShards, int parityShards)
+    /// <param name="data">An array of shards (data shards followed by parity shards). Missing shards should be null.</param>
+    /// <param name="dataShards">The number of data shards.</param>
+    /// <param name="parityShards">The number of parity shards.</param>
+    /// <param name="paddingSize">The number of padding bytes that were added during encoding.</param>
+    /// <returns>The decoded original data as a byte array.</returns>
+    public byte[] ManagedDecode(byte[][] data, int dataShards, int parityShards, int paddingSize = 0)
     {
         int size = 0;
+        for (int i = 0; i < data.Length; i++)
+        {
+            if (data[i] != null)
+            {
+                size = data[i].Length;
+                break;
+            }
+        }
 
         sbyte[][] sbytes = new sbyte[data.Length][];
         for (int i = 0; i < data.Length; i++)
         {
-            if (size == 0)
-            {
-                if (data[i] != null)
-                {
-                    size = data[i].Length;
-                }
-            }
-
             if (data[i] == null)
             {
                 data[i] = new byte[size];
@@ -190,34 +204,46 @@ public class ReedSolomon
             sbytes[i] = Array.ConvertAll(data[i], b => unchecked((sbyte)b));
         }
 
-        var result = ManagedDecode(sbytes, dataShards, parityShards);
+        var result = ManagedDecode(sbytes, dataShards, parityShards, paddingSize: paddingSize);
         return Array.ConvertAll(result, b => unchecked((byte)b));
     }
 
     /// <summary>
-    /// This produces a total amount of shards of dataShards + parityShard.
-    /// The Shards are already encoded. Note that the result will be bigger than the data input because of the parity shards being added.
+    /// Decodes the given shards back into the original data. Missing or null shards are recovered
+    /// using the Reed-Solomon parity information. The padding added during encoding is removed.
     /// </summary>
-    /// <param name="data"></param>
-    /// <returns></returns>
+    /// <param name="data">An array of shards (data shards followed by parity shards). Missing shards should be null.</param>
+    /// <param name="allowAllZeroes">If false, shards that are all zeroes are treated as missing and will be recovered. If true, all-zero shards are preserved as valid data.</param>
+    /// <param name="paddingSize">The number of padding bytes that were added during encoding.</param>
+    /// <returns>The decoded original data as an sbyte array.</returns>
     public sbyte[] ManagedDecode(sbyte[][] data, bool allowAllZeroes = false, int paddingSize = 0)
     {
         return ManagedDecode(data, this.DataShardCount, this.ParityShardCount, allowAllZeroes, paddingSize);
     }
 
     /// <summary>
-    /// This produces a total amount of shards of dataShards + parityShard.
-    /// The Shards are already encoded. Note that the result will be bigger than the data input because of the parity shards being added.
+    /// Decodes the given shards back into the original data. Missing or null shards are recovered
+    /// using the Reed-Solomon parity information. The padding added during encoding is removed.
     /// </summary>
-    /// <param name="data"></param>
-    /// <param name="dataShards"></param>
-    /// <param name="parityShards"></param>
-    /// <returns></returns>
+    /// <param name="data">An array of shards (data shards followed by parity shards). Missing shards should be null.</param>
+    /// <param name="dataShards">The number of data shards.</param>
+    /// <param name="parityShards">The number of parity shards.</param>
+    /// <param name="allowAllZeroes">If false, shards that are all zeroes are treated as missing and will be recovered. If true, all-zero shards are preserved as valid data.</param>
+    /// <param name="paddingSize">The number of padding bytes that were added during encoding.</param>
+    /// <returns>The decoded original data as an sbyte array.</returns>
     public sbyte[] ManagedDecode(sbyte[][] data, int dataShards, int parityShards, bool allowAllZeroes = false, int paddingSize = 0)
     {
         ReedSolomon rs = new ReedSolomon(dataShards, parityShards);
         int totalShards = dataShards + parityShards;
-        int shardSize = data[0].Length;
+        int shardSize = 0;
+        for (int i = 0; i < data.Length; i++)
+        {
+            if (data[i] != null)
+            {
+                shardSize = data[i].Length;
+                break;
+            }
+        }
         bool[] shardPresent = new bool[totalShards];
 
         for (int i = 0; i < data.Length; i++)
@@ -234,8 +260,8 @@ public class ReedSolomon
             }
         }
 
-        bool atleastOneShardIsMissing = shardPresent.Any(b => b == false);
-        if (atleastOneShardIsMissing)
+        bool atLeastOneShardIsMissing = shardPresent.Any(b => b == false);
+        if (atLeastOneShardIsMissing)
         {
             rs.DecodeMissing(data, shardPresent, 0, data[0].Length);
         }
@@ -246,7 +272,7 @@ public class ReedSolomon
             output.AddRange(data[i]);
         }
 
-        var outputArray = output.SkipLast(paddingSize).ToArray();
+        var outputArray = output.Take(output.Count - paddingSize).ToArray();
         return outputArray;
     }
 
@@ -300,12 +326,31 @@ public class ReedSolomon
     }
 
     /// <summary>
+    /// Returns true if the parity shards contain the right data. Note that this is slower than using the sbytes directly.
+    /// </summary>
+    /// <param name="shards">An array containing data shards followed by parity shards. <br/>
+    /// Each shard is a byte array, and they must all be the same size.</param>
+    /// <param name="firstByte">The index of the first byte in each shard to check.</param>
+    /// <param name="byteCount">The number of bytes to check in each shard.</param>
+    /// <returns></returns>
+    public bool IsParityCorrect(byte[][] shards, int firstByte, int byteCount)
+    {
+        sbyte[][] sbytes = new sbyte[shards.Length][];
+        for (int i = 0; i < shards.Length; i++)
+        {
+            sbytes[i] = Array.ConvertAll(shards[i], b => unchecked((sbyte)b));
+        }
+
+        return IsParityCorrect(sbytes, firstByte, byteCount);
+    }
+
+    /// <summary>
     /// Returns true if the parity shards contain the right data.
     /// </summary>
     /// <param name="shards">An array containing data shards followed by parity shards. <br/>
     /// Each shard is a byte array, and they must all be the same size.</param>
-    /// <param name="firstByte">The index of the first  sbyte in each shard to check.</param>
-    /// <param name="byteCount">The number of  sbytes to check in each shard.</param>
+    /// <param name="firstByte">The index of the first sbyte in each shard to check.</param>
+    /// <param name="byteCount">The number of sbytes to check in each shard.</param>
     /// <returns></returns>
     public bool IsParityCorrect(sbyte[][] shards, int firstByte, int byteCount)
     {
@@ -322,6 +367,38 @@ public class ReedSolomon
         // Do the checking.
         return CheckSomeShards(ParityRows, shards, toCheck, ParityShardCount,
                 firstByte, byteCount);
+    }
+
+    /// <summary>
+    /// Given a list of shards, some of which contain data, fills in the <br/>
+    /// ones that don't have data. Note that this is slower than using the sbytes directly. <br/>
+    ///<br/>
+    /// Quickly does nothing if all of the shards are present. <br/>
+    ///<br/>
+    /// If any shards are missing (based on the flags in shardsPresent), <br/>
+    /// the data in those shards is recomputed and filled in.
+    /// </summary>
+    /// <param name="shards"></param>
+    /// <param name="shardPresent"></param>
+    /// <param name="offset"></param>
+    /// <param name="byteCount"></param>
+    public void DecodeMissing(byte[][] shards,
+                          bool[] shardPresent,
+                          int offset,
+                          int byteCount)
+    {
+        sbyte[][] sbytes = new sbyte[shards.Length][];
+        for (int i = 0; i < shards.Length; i++)
+        {
+            sbytes[i] = Array.ConvertAll(shards[i], b => unchecked((sbyte)b));
+        }
+
+        DecodeMissing(sbytes, shardPresent, offset, byteCount);
+
+        for (int i = 0; i < shards.Length; i++)
+        {
+            shards[i] = Array.ConvertAll(sbytes[i], b => unchecked((byte)b));
+        }
     }
 
     /// <summary>
@@ -477,7 +554,7 @@ public class ReedSolomon
         }
         if (shardLength < offset + byteCount)
         {
-            throw new ArgumentException("buffers to small: " + byteCount + offset);
+            throw new ArgumentException("buffers too small: " + byteCount + " + " + offset);
         }
     }
 
@@ -644,4 +721,5 @@ public class ReedSolomon
         }
         return result;
     }
+}
 }

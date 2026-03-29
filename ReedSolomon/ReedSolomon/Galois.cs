@@ -1,5 +1,8 @@
-﻿namespace Witteborn.ReedSolomon;
+﻿using System;
+using System.Collections.Generic;
 
+namespace Witteborn.ReedSolomon
+{
 /// <summary>
 ///  8-bit Galois Field
 ///
@@ -129,10 +132,7 @@ public class Galois
 
         int logA = LOG_TABLE[a & 0xFF];
         int logResult = logA * n;
-        while (255 <= logResult)
-        {
-            logResult -= 255;
-        }
+        logResult %= 255;
 
         return EXP_TABLE[logResult];
     }
@@ -142,7 +142,7 @@ public class Galois
     /// </summary>
     /// <param name="polynomial"></param>
     /// <returns></returns>
-    /// <exception cref="Exception"></exception>
+    /// <exception cref="InvalidOperationException"></exception>
     public static short[] GenerateLogTable(int polynomial)
     {
         short[] result = new short[FIELD_SIZE];
@@ -155,7 +155,7 @@ public class Galois
         {
             if (result[b] != -1)
             {
-                throw new Exception("BUG: duplicate logarithm (bad polynomial?)");
+                throw new InvalidOperationException("Duplicate logarithm detected (invalid polynomial: " + polynomial + ")");
             }
             result[b] = (short)log;
             b = b << 1;
@@ -201,13 +201,13 @@ public class Galois
                 GenerateLogTable(i);
                 result.Add(i);
             }
-            catch (Exception e)
+            catch (InvalidOperationException)
             {
-                // this one didn't work
+                // This polynomial does not generate a valid field.
             }
         }
 
         return result.ToArray();
-        //return result.toArray(new Integer[result.size()]);
     }
+}
 }

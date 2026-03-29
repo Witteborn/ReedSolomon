@@ -1,7 +1,9 @@
-﻿using System.Text;
+﻿using System;
+using System.Linq;
+using System.Text;
 
-namespace Witteborn.ReedSolomon;
-
+namespace Witteborn.ReedSolomon
+{
 /// <summary>
 /// A matrix over the 8-bit Galois field.
 ///
@@ -46,23 +48,6 @@ public class Matrix
         }
     }
 
-    ///// <summary>
-    ///// Initializes a matrix with the given row-major data.
-    ///// </summary>
-    ///// <param name="data"></param>
-    ///// <exception cref="ArgumentException"></exception>
-    //public Matrix(byte[][] data) : this(
-    //      Array.ConvertAll(
-    //          Array.ConvertAll(
-    //              data,
-    //              array => unchecked((sbyte[])array)),
-    //          b => unchecked((sbyte)b
-    //          )
-    //          )
-    //          )
-    //{
-    //}
-
     /// <summary>
     /// Initializes a matrix with the given row-major data.
     /// </summary>
@@ -70,6 +55,14 @@ public class Matrix
     /// <exception cref="ArgumentException"></exception>
     public Matrix(sbyte[][] data)
     {
+        if (data == null)
+        {
+            throw new ArgumentException("data cannot be null");
+        }
+        if (data.Length == 0)
+        {
+            throw new ArgumentException("data cannot be empty");
+        }
         Rows = data.Length;
         Columns = data[0].Length;
         Data = new sbyte[Rows][];
@@ -79,10 +72,10 @@ public class Matrix
             {
                 throw new ArgumentException("Not all rows have the same number of columns");
             }
-            data[r] = new sbyte[Columns];
+            Data[r] = new sbyte[Columns];
             for (int c = 0; c < Columns; c++)
             {
-                data[r][c] = data[r][c];
+                Data[r][c] = data[r][c];
             }
         }
     }
@@ -108,7 +101,7 @@ public class Matrix
     /// Example: [[1, 2], [3, 4]]
     /// </summary>
     /// <returns></returns>
-    public override string? ToString()
+    public override string ToString()
     {
         StringBuilder result = new StringBuilder();
         result.Append('[');
@@ -155,7 +148,7 @@ public class Matrix
                 {
                     value += 256;
                 }
-                result.Append(string.Format("%02x ", value));
+                result.Append(string.Format("{0:x2} ", value));
             }
             result.Append("\n");
         }
@@ -205,20 +198,37 @@ public class Matrix
     /// </summary>
     /// <param name="obj"></param>
     /// <returns></returns>
-    public override bool Equals(object? other)
+    public override bool Equals(object other)
     {
-        if (other is not Matrix)
+        if (!(other is Matrix))
         {
             return false;
         }
         for (int r = 0; r < Rows; r++)
         {
-            if (!Data[r].Equals(((Matrix)other).Data[r]))
+            if (!Data[r].SequenceEqual(((Matrix)other).Data[r]))
             {
                 return false;
             }
         }
         return true;
+    }
+
+    /// <summary>
+    /// Returns a hash code for this matrix based on its contents.
+    /// </summary>
+    /// <returns></returns>
+    public override int GetHashCode()
+    {
+        int hash = Rows * 31 + Columns;
+        for (int r = 0; r < Rows; r++)
+        {
+            for (int c = 0; c < Columns; c++)
+            {
+                hash = hash * 31 + Data[r][c];
+            }
+        }
+        return hash;
     }
 
     /// <summary>
@@ -428,4 +438,5 @@ public class Matrix
             }
         }
     }
+}
 }
