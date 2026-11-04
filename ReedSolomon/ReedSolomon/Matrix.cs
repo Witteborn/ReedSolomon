@@ -1,9 +1,10 @@
-﻿using System;
+using System;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text;
 
-namespace Witteborn.ReedSolomon
-{
+namespace Witteborn.ReedSolomon;
+
 /// <summary>
 /// A matrix over the 8-bit Galois field.
 ///
@@ -15,22 +16,27 @@ public class Matrix
     /// <summary>
     /// The number of rows in the matrix.
     /// </summary>
-    private int Rows { get; set; }
+    private int Rows
+    {
+        get;
+        set;
+    }
 
     /// <summary>
     /// The number of columns in the matrix.
     /// </summary>
-    private int Columns { get; set; }
+    private int Columns
+    {
+        get;
+        set;
+    }
 
-    /// <summary>
-    /// The data in the matrix, in row major form. <br/>
-    ///<br/>
-    /// To get element(r, c) : data[r][c]<br/>
-    ///<br/>
-    /// Because this is computer science, and not math,<br/>
-    /// the indices for both the row and column start at 0.
-    /// </summary>
-    private sbyte[][] Data { get; set; }
+    /// <summary>Row-major values indexed by zero-based row and column.</summary>
+    private sbyte[][] Data
+    {
+        get;
+        set;
+    }
 
     /// <summary>
     /// Initialize a matrix of zeros.
@@ -42,40 +48,45 @@ public class Matrix
         Rows = rows;
         Columns = columns;
         Data = new sbyte[Rows][];
-        for (int r = 0; r < Rows; r++)
+
+        for (var rowIndex = 0; rowIndex < Rows; rowIndex++)
         {
-            Data[r] = new sbyte[Columns];
+            Data[rowIndex] = new sbyte[Columns];
         }
     }
 
     /// <summary>
     /// Initializes a matrix with the given row-major data.
     /// </summary>
-    /// <param name="data"></param>
     /// <exception cref="ArgumentException"></exception>
     public Matrix(sbyte[][] data)
     {
-        if (data == null)
+        if (data is null)
         {
             throw new ArgumentException("data cannot be null");
         }
+
         if (data.Length == 0)
         {
             throw new ArgumentException("data cannot be empty");
         }
+
         Rows = data.Length;
         Columns = data[0].Length;
         Data = new sbyte[Rows][];
-        for (int r = 0; r < Rows; r++)
+
+        for (var rowIndex = 0; rowIndex < Rows; rowIndex++)
         {
-            if (data[r].Length != Columns)
+            if (data[rowIndex].Length != Columns)
             {
                 throw new ArgumentException("Not all rows have the same number of columns");
             }
-            Data[r] = new sbyte[Columns];
-            for (int c = 0; c < Columns; c++)
+
+            Data[rowIndex] = new sbyte[Columns];
+
+            for (var columnIndex = 0; columnIndex < Columns; columnIndex++)
             {
-                Data[r][c] = data[r][c];
+                Data[rowIndex][columnIndex] = data[rowIndex][columnIndex];
             }
         }
     }
@@ -83,15 +94,15 @@ public class Matrix
     /// <summary>
     /// Returns an identity matrix of the given size.
     /// </summary>
-    /// <param name="size"></param>
-    /// <returns></returns>
     public static Matrix Identity(int size)
     {
-        Matrix result = new Matrix(size, size);
-        for (int i = 0; i < size; i++)
+        var result = new Matrix(size, size);
+
+        for (var diagonalIndex = 0; diagonalIndex < size; diagonalIndex++)
         {
-            result.Set(i, i, 1);
+            result.Set(diagonalIndex, diagonalIndex, 1);
         }
+
         return result;
     }
 
@@ -100,30 +111,38 @@ public class Matrix
     ///<br/>
     /// Example: [[1, 2], [3, 4]]
     /// </summary>
-    /// <returns></returns>
     public override string ToString()
     {
-        StringBuilder result = new StringBuilder();
-        result.Append('[');
-        for (int r = 0; r < Rows; r++)
+        const int fieldElementMask = Galois.FIELD_SIZE - 1;
+        var builder = new StringBuilder();
+
+        builder.Append('[');
+
+        for (var rowIndex = 0; rowIndex < Rows; rowIndex++)
         {
-            if (r != 0)
+            if (rowIndex != 0)
             {
-                result.Append(", ");
+                builder.Append(", ");
             }
-            result.Append('[');
-            for (int c = 0; c < Columns; c++)
+
+            builder.Append('[');
+
+            for (var columnIndex = 0; columnIndex < Columns; columnIndex++)
             {
-                if (c != 0)
+                if (columnIndex != 0)
                 {
-                    result.Append(", ");
+                    builder.Append(", ");
                 }
-                result.Append(Data[r][c] & 0xFF);
+
+                builder.Append(Data[rowIndex][columnIndex] & fieldElementMask);
             }
-            result.Append(']');
+
+            builder.Append(']');
         }
-        result.Append(']');
-        return result.ToString();
+
+        builder.Append(']');
+
+        return builder.ToString();
     }
 
     /// <summary>
@@ -135,208 +154,226 @@ public class Matrix
     /// 06 07 08 <br/>
     /// 09 0a 0b
     /// </summary>
-    /// <returns></returns>
     public string ToBigString()
     {
-        StringBuilder result = new StringBuilder();
-        for (int r = 0; r < Rows; r++)
+        var builder = new StringBuilder();
+
+        for (var rowIndex = 0; rowIndex < Rows; rowIndex++)
         {
-            for (int c = 0; c < Columns; c++)
+            for (var columnIndex = 0; columnIndex < Columns; columnIndex++)
             {
-                int value = Get(r, c);
+                var value = (int)Get(rowIndex, columnIndex);
+
                 if (value < 0)
                 {
-                    value += 256;
+                    value += Galois.FIELD_SIZE;
                 }
-                result.Append(string.Format("{0:x2} ", value));
+
+                builder.Append(string.Format("{0:x2} ", value));
             }
-            result.Append("\n");
+
+            builder.Append("\n");
         }
-        return result.ToString();
+
+        return builder.ToString();
     }
 
     /// <summary>
     /// Returns the value at row r, column c.
     /// </summary>
-    /// <param name="r"></param>
-    /// <param name="c"></param>
-    /// <returns></returns>
     public sbyte Get(int r, int c)
     {
-        if (r < 0 || Rows <= r)
+        var hasInvalidRowIndex = r < 0 || Rows <= r;
+
+        if (hasInvalidRowIndex)
         {
             throw new ArgumentException("Row index out of range: " + r);
         }
-        if (c < 0 || Columns <= c)
+
+        var hasInvalidColumnIndex = c < 0 || Columns <= c;
+
+        if (hasInvalidColumnIndex)
         {
             throw new ArgumentException("Column index out of range: " + c);
         }
+
         return Data[r][c];
     }
 
     /// <summary>
     /// Sets the value at row r, column c.
     /// </summary>
-    /// <param name="r"></param>
-    /// <param name="c"></param>
-    /// <param name="value"></param>
     public void Set(int r, int c, sbyte value)
     {
-        if (r < 0 || Rows <= r)
+        var hasInvalidRowIndex = r < 0 || Rows <= r;
+
+        if (hasInvalidRowIndex)
         {
             throw new ArgumentException("Row index out of range: " + r);
         }
-        if (c < 0 || Columns <= c)
+
+        var hasInvalidColumnIndex = c < 0 || Columns <= c;
+
+        if (hasInvalidColumnIndex)
         {
             throw new ArgumentException("Column index out of range: " + c);
         }
+
         Data[r][c] = value;
     }
 
     /// <summary>
     /// Returns true iff this matrix is identical to the other.
     /// </summary>
-    /// <param name="obj"></param>
-    /// <returns></returns>
-    public override bool Equals(object other)
+    public override bool Equals(object? other)
     {
-        if (!(other is Matrix))
+        if ((other is Matrix) == false)
         {
             return false;
         }
-        for (int r = 0; r < Rows; r++)
+
+        for (var rowIndex = 0; rowIndex < Rows; rowIndex++)
         {
-            if (!Data[r].SequenceEqual(((Matrix)other).Data[r]))
+            if (Data[rowIndex].SequenceEqual(((Matrix)other).Data[rowIndex]) == false)
             {
                 return false;
             }
         }
+
         return true;
     }
 
     /// <summary>
     /// Returns a hash code for this matrix based on its contents.
     /// </summary>
-    /// <returns></returns>
     public override int GetHashCode()
     {
-        int hash = Rows * 31 + Columns;
-        for (int r = 0; r < Rows; r++)
+        const int hashMultiplier = 31;
+        var hashCode = Rows * hashMultiplier + Columns;
+
+        for (var rowIndex = 0; rowIndex < Rows; rowIndex++)
         {
-            for (int c = 0; c < Columns; c++)
+            for (var columnIndex = 0; columnIndex < Columns; columnIndex++)
             {
-                hash = hash * 31 + Data[r][c];
+                hashCode = hashCode * hashMultiplier + Data[rowIndex][columnIndex];
             }
         }
-        return hash;
+
+        return hashCode;
     }
 
     /// <summary>
     /// Multiplies this matrix (the one on the left) by another
     /// matrix(the one on the right).
     /// </summary>
-    /// <param name="right"></param>
-    /// <returns></returns>
     public Matrix Times(Matrix right)
     {
         if (Columns != right.Rows)
         {
-            throw new ArgumentException(
-                    "Columns on left (" + Columns + ") " +
-                    "is different than rows on right (" + right.Rows + ")");
+            throw new ArgumentException("Columns on left (" + Columns + ") " + "is different than rows on right (" + right.Rows + ")");
         }
-        Matrix result = new Matrix(Rows, right.Columns);
-        for (int r = 0; r < Rows; r++)
+
+        var result = new Matrix(Rows, right.Columns);
+
+        for (var rowIndex = 0; rowIndex < Rows; rowIndex++)
         {
-            for (int c = 0; c < right.Columns; c++)
+            for (var columnIndex = 0; columnIndex < right.Columns; columnIndex++)
             {
-                sbyte value = 0;
-                for (int i = 0; i < Columns; i++)
+                var value = (sbyte)0;
+
+                for (var innerIndex = 0; innerIndex < Columns; innerIndex++)
                 {
-                    value ^= Galois.Multiply(Get(r, i), right.Get(i, c));
+                    var leftElement = Get(rowIndex, innerIndex);
+                    var rightElement = right.Get(innerIndex, columnIndex);
+                    var product = Galois.Multiply(leftElement, rightElement);
+
+                    value ^= product;
                 }
-                result.Set(r, c, value);
+
+                result.Set(rowIndex, columnIndex, value);
             }
         }
+
         return result;
     }
 
     /// <summary>
     /// Returns the concatenation of this matrix and the matrix on the right.
     /// </summary>
-    /// <param name="right"></param>
-    /// <returns></returns>
     public Matrix Augment(Matrix right)
     {
         if (Rows != right.Rows)
         {
             throw new ArgumentException("Matrices don't have the same number of rows");
         }
-        Matrix result = new Matrix(Rows, Columns + right.Columns);
-        for (int r = 0; r < Rows; r++)
+
+        var result = new Matrix(Rows, Columns + right.Columns);
+
+        for (var rowIndex = 0; rowIndex < Rows; rowIndex++)
         {
-            for (int c = 0; c < Columns; c++)
+            for (var columnIndex = 0; columnIndex < Columns; columnIndex++)
             {
-                result.Data[r][c] = Data[r][c];
+                result.Data[rowIndex][columnIndex] = Data[rowIndex][columnIndex];
             }
-            for (int c = 0; c < right.Columns; c++)
+
+            for (var columnIndex = 0; columnIndex < right.Columns; columnIndex++)
             {
-                result.Data[r][Columns + c] = right.Data[r][c];
+                result.Data[rowIndex][Columns + columnIndex] = right.Data[rowIndex][columnIndex];
             }
         }
+
         return result;
     }
 
     /// <summary>
     /// Returns a part of this matrix.
     /// </summary>
-    /// <param name="rmin"></param>
-    /// <param name="cmin"></param>
-    /// <param name="rmax"></param>
-    /// <param name="cmax"></param>
-    /// <returns></returns>
     public Matrix Submatrix(int rmin, int cmin, int rmax, int cmax)
     {
-        Matrix result = new Matrix(rmax - rmin, cmax - cmin);
-        for (int r = rmin; r < rmax; r++)
+        var result = new Matrix(rmax - rmin, cmax - cmin);
+
+        for (var rowIndex = rmin; rowIndex < rmax; rowIndex++)
         {
-            for (int c = cmin; c < cmax; c++)
+            for (var columnIndex = cmin; columnIndex < cmax; columnIndex++)
             {
-                result.Data[r - rmin][c - cmin] = Data[r][c];
+                result.Data[rowIndex - rmin][columnIndex - cmin] = Data[rowIndex][columnIndex];
             }
         }
+
         return result;
     }
 
     /// <summary>
     /// Returns one row of the matrix as a byte array.
     /// </summary>
-    /// <param name="row"></param>
-    /// <returns></returns>
     public sbyte[] GetRow(int row)
     {
-        sbyte[] result = new sbyte[Columns];
-        for (int c = 0; c < Columns; c++)
+        var rowValues = new sbyte[Columns];
+
+        for (var columnIndex = 0; columnIndex < Columns; columnIndex++)
         {
-            result[c] = Get(row, c);
+            rowValues[columnIndex] = Get(row, columnIndex);
         }
-        return result;
+
+        return rowValues;
     }
 
     /// <summary>
     /// Exchanges two rows in the matrix.
     /// </summary>
-    /// <param name="r1"></param>
-    /// <param name="r2"></param>
     public void SwapRows(int r1, int r2)
     {
-        if (r1 < 0 || Rows <= r1 || r2 < 0 || Rows <= r2)
+        var hasInvalidRowIndices = r1 < 0 || Rows <= r1 || r2 < 0 || Rows <= r2;
+
+        if (hasInvalidRowIndices)
         {
             throw new ArgumentException("Row index out of range");
         }
-        sbyte[] tmp = Data[r1];
+
+        var originalFirstRow = Data[r1];
+
         Data[r1] = Data[r2];
-        Data[r2] = tmp;
+        Data[r2] = originalFirstRow;
     }
 
     /// <summary>
@@ -345,8 +382,7 @@ public class Matrix
     /// throws ArgumentException when the matrix is singular and
     /// doesn't have an inverse.
     /// </summary>
-    /// <returns></returns>
-    /// <exception cref="IllegalArgumentException"></exception>
+    /// <exception cref="ArgumentException"></exception>
     public Matrix Invert()
     {
         // Sanity check.
@@ -357,14 +393,15 @@ public class Matrix
 
         // Create a working matrix by augmenting this one with
         // an identity matrix on the right.
-        Matrix work = Augment(Identity(Rows));
+        var identity = Identity(Rows);
+        var augmentedMatrix = Augment(identity);
 
         // Do Gaussian elimination to transform the left half into
         // an identity matrix.
-        work.GaussianElimination();
+        augmentedMatrix.GaussianElimination();
 
         // The right half is now the inverse.
-        return work.Submatrix(0, Rows, Columns, Columns * 2);
+        return augmentedMatrix.Submatrix(0, Rows, Columns, Columns * 2);
     }
 
     /// <summary>
@@ -372,71 +409,96 @@ public class Matrix
     ///
     /// Assumes that this is an r by 2r matrix.
     /// </summary>
-    /// <exception cref="IllegalArgumentException"></exception>
+    /// <exception cref="ArgumentException"></exception>
     private void GaussianElimination()
     {
-        // Clear out the part below the main diagonal and scale the main
-        // diagonal to be 1.
-        for (int r = 0; r < Rows; r++)
+        for (var rowIndex = 0; rowIndex < Rows; rowIndex++)
         {
-            // If the element on the diagonal is 0, find a row below
-            // that has a non-zero and swap them.
-            if (Data[r][r] == 0)
+            EnsureDiagonalEntryIsNonZero(rowIndex);
+            ScaleRowToMakeDiagonalOne(rowIndex);
+            ClearColumnBelowDiagonal(rowIndex);
+        }
+
+        for (var diagonalIndex = 0; diagonalIndex < Rows; diagonalIndex++)
+        {
+            ClearColumnAboveDiagonal(diagonalIndex);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void EnsureDiagonalEntryIsNonZero(int rowIndex)
+    {
+        if (Data[rowIndex][rowIndex] != 0)
+        {
+            return;
+        }
+
+        for (var rowBelow = rowIndex + 1; rowBelow < Rows; rowBelow++)
+        {
+            if (Data[rowBelow][rowIndex] != 0)
             {
-                for (int rowBelow = r + 1; rowBelow < Rows; rowBelow++)
-                {
-                    if (Data[rowBelow][r] != 0)
-                    {
-                        SwapRows(r, rowBelow);
-                        break;
-                    }
-                }
-            }
-            // If we couldn't find one, the matrix is singular.
-            if (Data[r][r] == 0)
-            {
-                throw new ArgumentException("Matrix is singular");
-            }
-            // Scale to 1.
-            if (Data[r][r] != 1)
-            {
-                sbyte scale = Galois.Divide(1, Data[r][r]);
-                for (int c = 0; c < Columns; c++)
-                {
-                    Data[r][c] = Galois.Multiply(Data[r][c], scale);
-                }
-            }
-            // Make everything below the 1 be a 0 by subtracting
-            // a multiple of it.  (Subtraction and addition are
-            // both exclusive or in the Galois field.)
-            for (int rowBelow = r + 1; rowBelow < Rows; rowBelow++)
-            {
-                if (Data[rowBelow][r] != 0)
-                {
-                    sbyte scale = Data[rowBelow][r];
-                    for (int c = 0; c < Columns; c++)
-                    {
-                        Data[rowBelow][c] ^= Galois.Multiply(scale, Data[r][c]);
-                    }
-                }
+                SwapRows(rowIndex, rowBelow);
+                break;
             }
         }
 
-        // Now clear the part above the main diagonal.
-        for (int d = 0; d < Rows; d++)
+        if (Data[rowIndex][rowIndex] == 0)
         {
-            for (int rowAbove = 0; rowAbove < d; rowAbove++)
+            throw new ArgumentException("Matrix is singular");
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void ScaleRowToMakeDiagonalOne(int rowIndex)
+    {
+        if (Data[rowIndex][rowIndex] == 1)
+        {
+            return;
+        }
+
+        var scale = Galois.Divide(1, Data[rowIndex][rowIndex]);
+
+        for (var columnIndex = 0; columnIndex < Columns; columnIndex++)
+        {
+            Data[rowIndex][columnIndex] = Galois.Multiply(Data[rowIndex][columnIndex], scale);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void ClearColumnBelowDiagonal(int rowIndex)
+    {
+        for (var rowBelow = rowIndex + 1; rowBelow < Rows; rowBelow++)
+        {
+            if (Data[rowBelow][rowIndex] == 0)
             {
-                if (Data[rowAbove][d] != 0)
-                {
-                    sbyte scale = Data[rowAbove][d];
-                    for (int c = 0; c < Columns; c++)
-                    {
-                        Data[rowAbove][c] ^= Galois.Multiply(scale, Data[d][c]);
-                    }
-                }
+                continue;
+            }
+
+            var scale = Data[rowBelow][rowIndex];
+
+            for (var columnIndex = 0; columnIndex < Columns; columnIndex++)
+            {
+                Data[rowBelow][columnIndex] ^= Galois.Multiply(scale, Data[rowIndex][columnIndex]);
             }
         }
     }
-}
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void ClearColumnAboveDiagonal(int diagonalIndex)
+    {
+        for (var rowAbove = 0; rowAbove < diagonalIndex; rowAbove++)
+        {
+            if (Data[rowAbove][diagonalIndex] == 0)
+            {
+                continue;
+            }
+
+            var scale = Data[rowAbove][diagonalIndex];
+
+            for (var columnIndex = 0; columnIndex < Columns; columnIndex++)
+            {
+                Data[rowAbove][columnIndex] ^= Galois.Multiply(scale, Data[diagonalIndex][columnIndex]);
+            }
+        }
+    }
 }

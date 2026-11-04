@@ -1,0 +1,46 @@
+name: Build and test
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test on ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # x64 runs the AVX2 path and ARM64 the NEON path.
+        runner: [ ubuntu-latest, ubuntu-24.04-arm ]
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build
+        run: dotnet build ReedSolomon/ReedSolomon.slnx -c Release
+
+      - name: Check formatting
+        run: dotnet format ReedSolomon/ReedSolomon.slnx --verify-no-changes --no-restore
+
+      - name: Test
+        run: dotnet test ReedSolomon/ReedSolomonTests/ReedSolomonTests.csproj -c Release --no-build
+
+      - name: Test the scalar fallback
+        run: dotnet test ReedSolomon/ReedSolomonTests/ReedSolomonTests.csproj -c Release --no-build --environment DOTNET_EnableHWIntrinsic=0
+
+      - name: Run the README example
+        run: dotnet run --project ReedSolomon/ReadmeExample -c Release --no-build

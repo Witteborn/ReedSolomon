@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/validation/">
+    <Project Path="../validation/compatibility/Compatibility.csproj" />
+    <Project Path="../validation/performance/Validation.csproj" />
+  </Folder>
+  <Project Path="ReadmeExample/ReadmeExample.csproj" />
+  <Project Path="ReedSolomon/ReedSolomon.csproj" />
+  <Project Path="ReedSolomonTests/ReedSolomonTests.csproj" />
+</Solution>

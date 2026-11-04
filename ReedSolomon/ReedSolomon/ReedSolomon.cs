@@ -1,725 +1,346 @@
-﻿using System;
+using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics.Arm;
+using System.Runtime.Intrinsics.X86;
 
-namespace Witteborn.ReedSolomon
+namespace Witteborn.ReedSolomon;
+
+public sealed class ReedSolomon
 {
-/// <summary>
-///  Reed-Solomon Coding over 8-bit values.
-/// </summary>
-public class ReedSolomon
-{
-    private int DataShardCount { get; set; }
-    private int ParityShardCount { get; set; }
-    private int TotalShardCount { get; set; }
-    private Matrix Matrix { get; set; }
+    private const int DefaultBlockSizeBytes = 8192;
+    private const int SingleVectorUnrollFactor = 1;
 
-    /// <summary>
-    /// Rows from the matrix for encoding parity, each one as its own <br/>
-    ///  sbyte array to allow for efficient access while encoding.
-    /// </summary>
-    private sbyte[][] ParityRows { get; set; }
+    private readonly int dataShardCount;
+    private readonly int parityShardCount;
+    private readonly byte[][] parityCoefficientRows;
+    private readonly bool simdEnabled;
+    private readonly int blockSizeBytes;
+    private readonly int unrollFactor;
+    private static readonly ConcurrentDictionary<(int DataShardCount, int ParityShardCount), byte[][]> ParityMatrixCache =
+        new();
 
-    public ReedSolomon(int dataShardCount, int parityShardCount)
+    internal static readonly byte[][] MultiplicationTables = ShardCoding.MultiplicationTables;
+
+    internal bool SimdEnabled
     {
-        if (dataShardCount <= 0)
+        get
         {
-            throw new ArgumentException("dataShardCount must be positive", nameof(dataShardCount));
-        }
-        if (parityShardCount <= 0)
-        {
-            throw new ArgumentException("parityShardCount must be positive", nameof(parityShardCount));
-        }
-        if (dataShardCount + parityShardCount > 256)
-        {
-            throw new ArgumentException("total shard count cannot exceed 256");
-        }
-
-        this.DataShardCount = dataShardCount;
-        this.ParityShardCount = parityShardCount;
-        this.TotalShardCount = dataShardCount + parityShardCount;
-        this.Matrix = BuildMatrix(dataShardCount, this.TotalShardCount);
-        this.ParityRows = new sbyte[parityShardCount][];
-        for (int i = 0; i < parityShardCount; i++)
-        {
-            this.ParityRows[i] = this.Matrix.GetRow(dataShardCount + i);
+            return simdEnabled;
         }
     }
 
+    internal int BlockSizeBytes
+    {
+        get
+        {
+            return blockSizeBytes;
+        }
+    }
 
-    /// <summary>
-    /// This produces a total amount of shards of dataShards + parityShard.
-    /// The Shards are already encoded. Note that the result will be bigger than the data input because of the parity shards being added.
-    /// </summary>
-    /// <param name="data"></param>
-    /// <returns></returns>
+    internal int UnrollFactor
+    {
+        get
+        {
+            return unrollFactor;
+        }
+    }
+
+    /// <summary>Creates a codec for positive data/parity counts totaling at most 256.</summary>
+    /// <param name="dataShards">Number of data shards.</param>
+    /// <param name="parityShards">Number of parity shards.</param>
+    /// <param name="simd">Use AVX2 or ARM64 NEON when available; otherwise use scalar code.</param>
+    /// <param name="blockSize">Cache tile size in bytes, a positive multiple of 64.</param>
+    /// <param name="unroll">AVX2 two-output unroll factor: 1, 2 or 4.</param>
+    public ReedSolomon(
+        int dataShards,
+        int parityShards,
+        bool simd = true,
+        int blockSize = DefaultBlockSizeBytes,
+        int unroll = SingleVectorUnrollFactor)
+    {
+        const int simdBlockAlignmentBytes = 64;
+        const int twoVectorUnrollFactor = 2;
+        const int fourVectorUnrollFactor = 4;
+
+        var hasInvalidShardCounts = dataShards <= 0 || parityShards <= 0 || dataShards > Galois.FIELD_SIZE - parityShards;
+
+        if (hasInvalidShardCounts)
+        {
+            throw new ArgumentException(
+                $"Shard counts must be positive and total at most {Galois.FIELD_SIZE}, but got {dataShards} data and {parityShards} parity shards.");
+        }
+
+        dataShardCount = dataShards;
+        parityShardCount = parityShards;
+
+        var hasInvalidSimdConfiguration = blockSize <= 0
+            || blockSize % simdBlockAlignmentBytes != 0
+            || (unroll != SingleVectorUnrollFactor
+            && unroll != twoVectorUnrollFactor
+            && unroll != fourVectorUnrollFactor);
+
+        if (hasInvalidSimdConfiguration)
+        {
+            throw new ArgumentException(
+                $"Block size must be a positive multiple of {simdBlockAlignmentBytes} bytes and unroll must be {SingleVectorUnrollFactor}, {twoVectorUnrollFactor} or {fourVectorUnrollFactor}, but got block size {blockSize} and unroll {unroll}.");
+        }
+
+        simdEnabled = simd && (Avx2.IsSupported || AdvSimd.Arm64.IsSupported);
+        blockSizeBytes = blockSize;
+        unrollFactor = unroll;
+        parityCoefficientRows = ParityMatrixCache.GetOrAdd(
+            (dataShards, parityShards),
+            static shardGeometry => BuildParityRows(shardGeometry.DataShardCount, shardGeometry.ParityShardCount));
+    }
+
+    private static byte[][] BuildParityRows(int dataShardCount, int parityShardCount)
+    {
+        // Identity rows preserve the original data shards in the systematic Vandermonde matrix.
+        var totalShardCount = dataShardCount + parityShardCount;
+        var matrix = new Matrix(totalShardCount, dataShardCount);
+
+        for (var rowIndex = 0; rowIndex < totalShardCount; rowIndex++)
+        {
+            for (var columnIndex = 0; columnIndex < dataShardCount; columnIndex++)
+            {
+                var coefficient = Galois.Exp(unchecked((sbyte)rowIndex), columnIndex);
+
+                matrix.Set(rowIndex, columnIndex, coefficient);
+            }
+        }
+
+        var dataRows = matrix.Submatrix(0, 0, dataShardCount, dataShardCount);
+        var dataRowsInverse = dataRows.Invert();
+
+        matrix = matrix.Times(dataRowsInverse);
+
+        var parityRows = new byte[parityShardCount][];
+
+        for (var rowIndex = 0; rowIndex < parityShardCount; rowIndex++)
+        {
+            var matrixRow = matrix.GetRow(dataShardCount + rowIndex);
+
+            parityRows[rowIndex] = Array.ConvertAll(
+                matrixRow,
+                coefficientValue => unchecked((byte)coefficientValue));
+        }
+
+        return parityRows;
+    }
+
+    /// <summary>Copies nonempty data into newly allocated shards, zero-pads and encodes parity.</summary>
     public byte[][] ManagedEncode(byte[] data)
     {
-        return ManagedEncode(data, this.DataShardCount, this.ParityShardCount);
-    }
-
-    /// <summary>
-    /// This produces a total amount of shards of dataShards + parityShard.
-    /// The Shards are already encoded. Note that the result will be bigger than the data input because of the parity shards being added.
-    /// </summary>
-    /// <param name="data"></param>
-    /// <param name="dataShards"></param>
-    /// <param name="parityShards"></param>
-    /// <returns></returns>
-    public byte[][] ManagedEncode(byte[] data, int dataShards, int parityShards)
-    {
-        sbyte[] sbyteData = Array.ConvertAll(data, b => unchecked((sbyte)b));
-        var encodedShards = ManagedEncode(sbyteData, dataShards, parityShards);
-
-        var result = new List<byte[]>();
-
-        for (int i = 0; i < encodedShards.Length; i++)
+        if (data is null)
         {
-            var shard = encodedShards[i];
-            byte[] rawShard = Array.ConvertAll(shard, b => unchecked((byte)b));
-            result.Add(rawShard);
+            throw new ArgumentNullException(nameof(data));
         }
 
-        return result.ToArray();
-    }
-
-    /// <summary>
-    /// This returns the expected amount of padding for this data.
-    /// </summary>
-    /// <param name="dataSize"></param>
-    /// <returns></returns>
-    public int GetPaddingSize(int dataSize)
-    {
-        return GetPaddingSize(dataSize, this.DataShardCount);
-    }
-
-    /// <summary>
-    /// This returns the expected amount of padding for this data.
-    /// </summary>
-    /// <param name="dataSize"></param>
-    /// <param name="dataShards"></param>
-    /// <returns></returns>
-    public int GetPaddingSize(int dataSize, int dataShards)
-    {
-        int shardSize = (int)Math.Ceiling((double)dataSize / dataShards);
-        int totalDataSize = shardSize * dataShards;
-        int paddingSize = totalDataSize - dataSize;
-        return paddingSize;
-    }
-
-    /// <summary>
-    /// This produces a total amount of shards of dataShards + parityShard.
-    /// The Shards are already encoded. Note that the result will be bigger than the data input because of the parity shards being added.
-    /// </summary>
-    /// <param name="data"></param>
-    /// <param name="dataShards"></param>
-    /// <param name="parityShards"></param>
-    /// <returns></returns>
-    public sbyte[][] ManagedEncode(sbyte[] data)
-    {
-        return ManagedEncode(data, this.DataShardCount, this.ParityShardCount);
-    }
-
-    /// <summary>
-    /// This produces a total amount of shards of dataShards + parityShard.
-    /// The Shards are already encoded. Note that the result will be bigger than the data input because of the parity shards being added.
-    /// </summary>
-    /// <param name="data"></param>
-    /// <param name="dataShards"></param>
-    /// <param name="parityShards"></param>
-    /// <returns></returns>
-    public sbyte[][] ManagedEncode(sbyte[] data, int dataShards, int parityShards)
-    {
-        int totalShards = dataShards + parityShards;
-
-        int shardSize = (int)Math.Ceiling((double)data.Length / dataShards);
-        int totalDataSize = shardSize * dataShards;
-        int paddingSize = totalDataSize - data.Length;
-        if (paddingSize > 0)
+        if (data.Length == 0)
         {
-            Array.Resize(ref data, totalDataSize);
+            throw new ArgumentException("Data must not be empty because every shard needs at least one byte.", nameof(data));
         }
 
-        var rs = new ReedSolomon(dataShards, parityShards);
-        var shardsList = new List<sbyte[]>();
+        var lastDataByteIndex = data.Length - 1;
+        var lastDataShardIndex = lastDataByteIndex / dataShardCount;
+        var shardLength = checked(lastDataShardIndex + 1);
+        var shards = new byte[dataShardCount + parityShardCount][];
 
-        for (int i = 0; i < dataShards; i++)
+        for (var shardIndex = 0; shardIndex < shards.Length; shardIndex++)
         {
-            sbyte[] shardData = new sbyte[shardSize];
-            Array.Copy(data, i * shardSize, shardData, 0, shardSize);
-            shardsList.Add(shardData);
-        }
+            // Parity is fully assigned by the first coefficient pass. Data
+            // is copied in full except explicit zero padding in the final shards.
+            shards[shardIndex] = GC.AllocateUninitializedArray<byte>(shardLength);
 
-        for (int i = dataShards; i < totalShards; i++)
-        {
-            shardsList.Add(new sbyte[shardSize]);
-        }
-        var shards = shardsList.ToArray();
-        rs.EncodeParity(shards, 0, shardSize);
-
-        return shards.ToArray();
-    }
-
-    /// <summary>
-    /// Decodes the given shards back into the original data. Missing or null shards are recovered
-    /// using the Reed-Solomon parity information. The padding added during encoding is removed.
-    /// </summary>
-    /// <param name="data">An array of shards (data shards followed by parity shards). Missing shards should be null.</param>
-    /// <param name="paddingSize">The number of padding bytes that were added during encoding.</param>
-    /// <returns>The decoded original data as a byte array.</returns>
-    public byte[] ManagedDecode(byte[][] data, int paddingSize = 0)
-    {
-        return ManagedDecode(data, this.DataShardCount, this.ParityShardCount, paddingSize);
-    }
-
-    /// <summary>
-    /// Decodes the given shards back into the original data. Missing or null shards are recovered
-    /// using the Reed-Solomon parity information. The padding added during encoding is removed.
-    /// </summary>
-    /// <param name="data">An array of shards (data shards followed by parity shards). Missing shards should be null.</param>
-    /// <param name="dataShards">The number of data shards.</param>
-    /// <param name="parityShards">The number of parity shards.</param>
-    /// <param name="paddingSize">The number of padding bytes that were added during encoding.</param>
-    /// <returns>The decoded original data as a byte array.</returns>
-    public byte[] ManagedDecode(byte[][] data, int dataShards, int parityShards, int paddingSize = 0)
-    {
-        int size = 0;
-        for (int i = 0; i < data.Length; i++)
-        {
-            if (data[i] != null)
+            if (shardIndex < dataShardCount)
             {
-                size = data[i].Length;
-                break;
+                var blockStart = shardIndex * shardLength;
+                var remainingDataBytes = data.Length - blockStart;
+                var availableDataBytes = Math.Max(0, remainingDataBytes);
+                var bytesToCopy = Math.Min(shardLength, availableDataBytes);
+                var sourceOffset = Math.Min(blockStart, data.Length);
+                var sourceBytes = data.AsSpan(sourceOffset, bytesToCopy);
+
+                sourceBytes.CopyTo(shards[shardIndex]);
+                shards[shardIndex].AsSpan(bytesToCopy).Clear();
             }
         }
 
-        sbyte[][] sbytes = new sbyte[data.Length][];
-        for (int i = 0; i < data.Length; i++)
-        {
-            if (data[i] == null)
-            {
-                data[i] = new byte[size];
-            }
+        EncodeParity(shards);
 
-            sbytes[i] = Array.ConvertAll(data[i], b => unchecked((sbyte)b));
-        }
-
-        var result = ManagedDecode(sbytes, dataShards, parityShards, paddingSize: paddingSize);
-        return Array.ConvertAll(result, b => unchecked((byte)b));
+        return shards;
     }
 
-    /// <summary>
-    /// Decodes the given shards back into the original data. Missing or null shards are recovered
-    /// using the Reed-Solomon parity information. The padding added during encoding is removed.
-    /// </summary>
-    /// <param name="data">An array of shards (data shards followed by parity shards). Missing shards should be null.</param>
-    /// <param name="allowAllZeroes">If false, shards that are all zeroes are treated as missing and will be recovered. If true, all-zero shards are preserved as valid data.</param>
-    /// <param name="paddingSize">The number of padding bytes that were added during encoding.</param>
-    /// <returns>The decoded original data as an sbyte array.</returns>
-    public sbyte[] ManagedDecode(sbyte[][] data, bool allowAllZeroes = false, int paddingSize = 0)
+    /// <summary>Overwrites all parity bytes using equal-sized, nonempty caller-owned shards.</summary>
+    public void EncodeParity(byte[][] shards)
     {
-        return ManagedDecode(data, this.DataShardCount, this.ParityShardCount, allowAllZeroes, paddingSize);
+        ValidateShards(shards);
+        CombineRows(
+            parityCoefficientRows,
+            shards.AsSpan(0, dataShardCount),
+            shards.AsSpan(dataShardCount, parityShardCount));
     }
 
-    /// <summary>
-    /// Decodes the given shards back into the original data. Missing or null shards are recovered
-    /// using the Reed-Solomon parity information. The padding added during encoding is removed.
-    /// </summary>
-    /// <param name="data">An array of shards (data shards followed by parity shards). Missing shards should be null.</param>
-    /// <param name="dataShards">The number of data shards.</param>
-    /// <param name="parityShards">The number of parity shards.</param>
-    /// <param name="allowAllZeroes">If false, shards that are all zeroes are treated as missing and will be recovered. If true, all-zero shards are preserved as valid data.</param>
-    /// <param name="paddingSize">The number of padding bytes that were added during encoding.</param>
-    /// <returns>The decoded original data as an sbyte array.</returns>
-    public sbyte[] ManagedDecode(sbyte[][] data, int dataShards, int parityShards, bool allowAllZeroes = false, int paddingSize = 0)
+    /// <summary>Restores null data shards and joins the data, removing the specified padding.</summary>
+    /// <remarks>Zero-filled shards are valid data. Missing parity shards remain null.</remarks>
+    public byte[] ManagedDecode(byte[]?[] shards, int paddingSize = 0)
     {
-        ReedSolomon rs = new ReedSolomon(dataShards, parityShards);
-        int totalShards = dataShards + parityShards;
-        int shardSize = 0;
-        for (int i = 0; i < data.Length; i++)
-        {
-            if (data[i] != null)
-            {
-                shardSize = data[i].Length;
-                break;
-            }
-        }
-        bool[] shardPresent = new bool[totalShards];
+        var information = ManagedShardRecovery.Inspect(shards, paddingSize, dataShardCount, parityShardCount);
 
-        for (int i = 0; i < data.Length; i++)
+        if (information.MissingDataIndices.Count != 0)
         {
-            //if any shard is null, create a new array
-            if (data[i] == null || (allowAllZeroes == false && data[i].All(d => d == 0)))
-            {
-                data[i] = new sbyte[shardSize];
-                shardPresent[i] = false;
-            }
-            else
-            {
-                shardPresent[i] = true;
-            }
+            ManagedShardRecovery.Restore(shards, information, dataShardCount, parityCoefficientRows, this);
         }
 
-        bool atLeastOneShardIsMissing = shardPresent.Any(b => b == false);
-        if (atLeastOneShardIsMissing)
-        {
-            rs.DecodeMissing(data, shardPresent, 0, data[0].Length);
-        }
-
-        var output = new List<sbyte>();
-        for (int i = 0; i < dataShards; i++)
-        {
-            output.AddRange(data[i]);
-        }
-
-        var outputArray = output.Take(output.Count - paddingSize).ToArray();
-        return outputArray;
+        return ManagedShardRecovery.JoinData(shards, information.ShardLength, paddingSize, dataShardCount);
     }
 
-    /// <summary>
-    /// Encodes parity for a set of data shards. Note that this is slower than using the sbytes directly
-    /// </summary>
-    /// <param name="shards">An array containing data shards followed by parity shards. <br/>
-    /// Each shard is a byte array, and they must all be the same size
-    /// .</param>
-    /// <param name="offset">The index of the first  sbyte in each shard to encode.</param>
-    /// <param name="byteCount">The number of  sbytes to encode in each shard.</param>
-    public void EncodeParity(byte[][] shards, int offset, int byteCount)
+    /// <summary>Restores missing data into preallocated buffers using explicit presence flags.</summary>
+    /// <remarks>Does not restore parity or modify the flags. Targets must not alias any other shard.</remarks>
+    public void ReconstructDataInto(byte[][] shards, ReadOnlySpan<bool> present, DecodeWorkspace workspace)
     {
-        sbyte[][] sbytes = new sbyte[shards.Length][];
-        for (int i = 0; i < shards.Length; i++)
+        if (workspace is null)
         {
-            sbytes[i] = Array.ConvertAll(shards[i], b => unchecked((sbyte)b));
+            throw new ArgumentNullException(nameof(workspace));
         }
 
-        EncodeParity(sbytes, offset, byteCount);
+        ValidateShards(shards);
+        ValidateWorkspace(shards, present, workspace);
+        ValidateMissingDataBuffers(shards, present);
 
-        for (int i = 0; i < shards.Length; i++)
+        var reconstructionPlan = GetReconstructionPlan(present, workspace);
+
+        if (reconstructionPlan.MissingDataIndices.Length == 0)
         {
-            shards[i] = Array.ConvertAll(sbytes[i], b => unchecked((byte)b));
-        }
-    }
-
-    /// <summary>
-    /// Encodes parity for a set of data shards.
-    /// </summary>
-    /// <param name="shards">An array containing data shards followed by parity shards. <br/>
-    /// Each shard is a byte array, and they must all be the same size
-    /// .</param>
-    /// <param name="offset">The index of the first  sbyte in each shard to encode.</param>
-    /// <param name="byteCount">The number of  sbytes to encode in each shard.</param>
-    public void EncodeParity(sbyte[][] shards, int offset, int byteCount)
-    {
-        // Check arguments.
-        CheckBuffersAndSizes(shards, offset, byteCount);
-
-        // Build the array of output buffers.
-        sbyte[][] outputs = new sbyte[ParityShardCount][];
-        for (int i = 0; i < ParityShardCount; i++)
-        {
-            outputs[i] = shards[DataShardCount + i];
-        }
-
-        // Do the coding.
-        CodeSomeShards(ParityRows, shards, outputs, ParityShardCount,
-                offset, byteCount);
-    }
-
-    /// <summary>
-    /// Returns true if the parity shards contain the right data. Note that this is slower than using the sbytes directly.
-    /// </summary>
-    /// <param name="shards">An array containing data shards followed by parity shards. <br/>
-    /// Each shard is a byte array, and they must all be the same size.</param>
-    /// <param name="firstByte">The index of the first byte in each shard to check.</param>
-    /// <param name="byteCount">The number of bytes to check in each shard.</param>
-    /// <returns></returns>
-    public bool IsParityCorrect(byte[][] shards, int firstByte, int byteCount)
-    {
-        sbyte[][] sbytes = new sbyte[shards.Length][];
-        for (int i = 0; i < shards.Length; i++)
-        {
-            sbytes[i] = Array.ConvertAll(shards[i], b => unchecked((sbyte)b));
-        }
-
-        return IsParityCorrect(sbytes, firstByte, byteCount);
-    }
-
-    /// <summary>
-    /// Returns true if the parity shards contain the right data.
-    /// </summary>
-    /// <param name="shards">An array containing data shards followed by parity shards. <br/>
-    /// Each shard is a byte array, and they must all be the same size.</param>
-    /// <param name="firstByte">The index of the first sbyte in each shard to check.</param>
-    /// <param name="byteCount">The number of sbytes to check in each shard.</param>
-    /// <returns></returns>
-    public bool IsParityCorrect(sbyte[][] shards, int firstByte, int byteCount)
-    {
-        // Check arguments.
-        CheckBuffersAndSizes(shards, firstByte, byteCount);
-
-        // Build the array of buffers being checked.
-        sbyte[][] toCheck = new sbyte[ParityShardCount][];
-        for (int i = 0; i < ParityShardCount; i++)
-        {
-            toCheck[i] = shards[DataShardCount + i];
-        }
-
-        // Do the checking.
-        return CheckSomeShards(ParityRows, shards, toCheck, ParityShardCount,
-                firstByte, byteCount);
-    }
-
-    /// <summary>
-    /// Given a list of shards, some of which contain data, fills in the <br/>
-    /// ones that don't have data. Note that this is slower than using the sbytes directly. <br/>
-    ///<br/>
-    /// Quickly does nothing if all of the shards are present. <br/>
-    ///<br/>
-    /// If any shards are missing (based on the flags in shardsPresent), <br/>
-    /// the data in those shards is recomputed and filled in.
-    /// </summary>
-    /// <param name="shards"></param>
-    /// <param name="shardPresent"></param>
-    /// <param name="offset"></param>
-    /// <param name="byteCount"></param>
-    public void DecodeMissing(byte[][] shards,
-                          bool[] shardPresent,
-                          int offset,
-                          int byteCount)
-    {
-        sbyte[][] sbytes = new sbyte[shards.Length][];
-        for (int i = 0; i < shards.Length; i++)
-        {
-            sbytes[i] = Array.ConvertAll(shards[i], b => unchecked((sbyte)b));
-        }
-
-        DecodeMissing(sbytes, shardPresent, offset, byteCount);
-
-        for (int i = 0; i < shards.Length; i++)
-        {
-            shards[i] = Array.ConvertAll(sbytes[i], b => unchecked((byte)b));
-        }
-    }
-
-    /// <summary>
-    /// Given a list of shards, some of which contain data, fills in the <br/>
-    /// ones that don't have data. <br/>
-    ///<br/>
-    /// Quickly does nothing if all of the shards are present. <br/>
-    ///<br/>
-    /// If any shards are missing (based on the flags in shardsPresent), <br/>
-    /// the data in those shards is recomputed and filled in.
-    /// </summary>
-    /// <param name="shards"></param>
-    /// <param name="shardPresent"></param>
-    /// <param name="offset"></param>
-    /// <param name="byteCount"></param>
-    public void DecodeMissing(sbyte[][] shards,
-                          bool[] shardPresent,
-                          int offset,
-                          int byteCount)
-    {
-        // Check arguments.
-        CheckBuffersAndSizes(shards, offset, byteCount);
-
-        // Quick check: are all of the shards present?  If so, there's
-        // nothing to do.
-        int numberPresent = 0;
-        for (int i = 0; i < this.TotalShardCount; i++)
-        {
-            if (shardPresent[i])
-            {
-                numberPresent += 1;
-            }
-        }
-        if (numberPresent == this.TotalShardCount)
-        {
-            // Cool.  All of the shards data data.  We don't
-            // need to do anything.
             return;
         }
 
-        // More complete sanity check
-        if (numberPresent < this.DataShardCount)
-        {
-            throw new ArgumentException("Not enough shards present");
-        }
+        workspace.BindBuffers(shards, reconstructionPlan);
+        CombineRows(
+            reconstructionPlan.CoefficientRows,
+            workspace.Inputs,
+            workspace.Outputs.AsSpan(0, reconstructionPlan.MissingDataIndices.Length));
 
-        // Pull out the rows of the matrix that correspond to the
-        // shards that we have and build a square matrix.  This
-        // matrix could be used to generate the shards that we have
-        // from the original data.
-        //
-        // Also, pull out an array holding just the shards that
-        // correspond to the rows of the submatrix.  These shards
-        // will be the input to the decoding process that re-creates
-        // the missing data shards.
-        Matrix subMatrix = new Matrix(this.DataShardCount, this.DataShardCount);
-        sbyte[][] subShards = new sbyte[this.DataShardCount][];
+        workspace.ReleaseBuffers();
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void ValidateWorkspace(byte[][] shards, ReadOnlySpan<bool> present, DecodeWorkspace workspace)
+    {
+        var hasIncompatibleWorkspace = present.Length != shards.Length
+            || workspace.Inputs.Length != dataShardCount
+            || workspace.Outputs.Length != parityShardCount;
+
+        if (hasIncompatibleWorkspace)
         {
-            int subMatrixRow = 0;
-            for (int matrixRow = 0; matrixRow < this.TotalShardCount && subMatrixRow < this.DataShardCount; matrixRow++)
+            throw CreateWorkspaceMismatchException(shards, present, workspace);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void ValidateMissingDataBuffers(byte[][] shards, ReadOnlySpan<bool> present)
+    {
+        for (var shardIndex = 0; shardIndex < dataShardCount; shardIndex++)
+        {
+            if (present[shardIndex])
             {
-                if (shardPresent[matrixRow])
+                continue;
+            }
+
+            for (var otherShardIndex = 0; otherShardIndex < shards.Length; otherShardIndex++)
+            {
+                var targetAliasesAnotherShard = shardIndex != otherShardIndex && ReferenceEquals(shards[shardIndex], shards[otherShardIndex]);
+
+                if (targetAliasesAnotherShard)
                 {
-                    for (int c = 0; c < this.DataShardCount; c++)
-                    {
-                        subMatrix.Set(subMatrixRow, c, this.Matrix.Get(matrixRow, c));
-                    }
-                    subShards[subMatrixRow] = shards[matrixRow];
-                    subMatrixRow += 1;
+                    throw CreateBufferSharingException(shardIndex, otherShardIndex);
                 }
             }
         }
-
-        // Invert the matrix, so we can go from the encoded shards
-        // back to the original data.  Then pull out the row that
-        // generates the shard that we want to decode.  Note that
-        // since this matrix maps back to the orginal data, it can
-        // be used to create a data shard, but not a parity shard.
-        Matrix dataDecodeMatrix = subMatrix.Invert();
-
-        // Re-create any data shards that were missing.
-        //
-        // The input to the coding is all of the shards we actually
-        // have, and the output is the missing data shards.  The computation
-        // is done using the special decode matrix we just built.
-        sbyte[][] outputs = new sbyte[this.ParityShardCount][];
-        sbyte[][] matrixRows = new sbyte[this.ParityShardCount][];
-        int outputCount = 0;
-        for (int iShard = 0; iShard < this.DataShardCount; iShard++)
-        {
-            if (!shardPresent[iShard])
-            {
-                outputs[outputCount] = shards[iShard];
-                matrixRows[outputCount] = dataDecodeMatrix.GetRow(iShard);
-                outputCount += 1;
-            }
-        }
-        CodeSomeShards(matrixRows, subShards, outputs, outputCount, offset, byteCount);
-
-        // Now that we have all of the data shards intact, we can
-        // compute any of the parity that is missing.
-        //
-        // The input to the coding is ALL of the data shards, including
-        // any that we just calculated.  The output is whichever of the
-        // data shards were missing.
-        outputCount = 0;
-        for (int iShard = this.DataShardCount; iShard < this.TotalShardCount; iShard++)
-        {
-            if (!shardPresent[iShard])
-            {
-                outputs[outputCount] = shards[iShard];
-                matrixRows[outputCount] = this.ParityRows[iShard - this.DataShardCount];
-                outputCount += 1;
-            }
-        }
-        CodeSomeShards(matrixRows, shards, outputs, outputCount, offset, byteCount);
     }
 
-    /// <summary>
-    /// Checks the consistency of arguments passed to public methods.
-    /// </summary>
-    /// <param name="shards"></param>
-    /// <param name="offset"></param>
-    /// <param name="byteCount"></param>
-    /// <exception cref="NotImplementedException"></exception>
-    private void CheckBuffersAndSizes(sbyte[][] shards, int offset, int byteCount)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private ReconstructionPlan GetReconstructionPlan(ReadOnlySpan<bool> present, DecodeWorkspace workspace)
     {
-        // The number of buffers should be equal to the number of
-        // data shards plus the number of parity shards.
-        if (shards.Length != this.TotalShardCount)
+        const int maximumCachedReconstructionPlans = 128;
+
+        var presenceKey = ShardPresenceKey.Create(present);
+
+        if (workspace.Plans.TryGetValue(presenceKey, out var reconstructionPlan) == false)
         {
-            throw new ArgumentException("wrong number of shards: " + shards.Length);
+            reconstructionPlan = ReconstructionPlanner.Create(present, dataShardCount, parityCoefficientRows);
+
+            if (workspace.Plans.Count == maximumCachedReconstructionPlans)
+            {
+                workspace.Plans.Clear();
+            }
+
+            workspace.Plans.Add(presenceKey, reconstructionPlan);
         }
 
-        // All of the shard buffers should be the same length.
-        int shardLength = shards[0].Length;
-        for (int i = 1; i < shards.Length; i++)
+        return reconstructionPlan;
+    }
+
+    private void ValidateShards(byte[][] shards)
+    {
+        if (shards is null)
         {
-            if (shards[i].Length != shardLength)
+            throw new ArgumentNullException(nameof(shards));
+        }
+
+        var hasInvalidShards = shards.Length != dataShardCount + parityShardCount || shards[0] is null || shards[0].Length == 0;
+
+        if (hasInvalidShards)
+        {
+            throw new ArgumentException(
+                $"Expected {dataShardCount + parityShardCount} shards starting with a nonempty shard, but got {shards.Length} shards.");
+        }
+
+        var shardLength = shards[0].Length;
+
+        for (var shardIndex = 0; shardIndex < shards.Length; shardIndex++)
+        {
+            var shard = shards[shardIndex];
+            var hasInvalidShardLength = shard is null || shard.Length != shardLength;
+
+            if (hasInvalidShardLength)
             {
-                throw new ArgumentException("Shards are different sizes");
+                throw new ArgumentException($"Shard {shardIndex} must exist and have {shardLength} bytes like the first shard.");
             }
         }
 
-        // The offset and byteCount must be non-negative and fit in the buffers.
-        if (offset < 0)
+        // Read-only data shards may alias, but a writable parity buffer may not.
+        for (var parityShardIndex = dataShardCount; parityShardIndex < shards.Length; parityShardIndex++)
         {
-            throw new ArgumentException("offset is negative: " + offset);
-        }
-        if (byteCount < 0)
-        {
-            throw new ArgumentException("byteCount is negative: " + byteCount);
-        }
-        if (shardLength < offset + byteCount)
-        {
-            throw new ArgumentException("buffers too small: " + byteCount + " + " + offset);
-        }
-    }
-
-    /// <summary>
-    ///Multiplies a subset of rows from a coding matrix by a full set of <br/>
-    ///input shards to produce some output shards.
-    /// </summary>
-    /// <param name="matrixRows">The rows from the matrix to use.</param>
-    /// <param name="inputs">An array of byte arrays, each of which is one input shard. <br/>
-    /// The inputs array may have extra buffers after the ones <br/>
-    /// that are used.They will be ignored.The number of <br/>
-    /// inputs used is determined by the length of the <br/>
-    /// each matrix row.</param>
-    /// <param name="outputs">Byte arrays where the computed shards are stored.
-    /// The outputs array may also have extra, unused, elements <br/>
-    /// at the end.The number of outputs computed, and the <br/>
-    /// number of matrix rows used, is determined by <br/>
-    /// outputCount.</param>
-    /// <param name="outputCount">The number of outputs to compute.</param>
-    /// <param name="offset">The index in the inputs and output of the first byte
-    /// to process.</param>
-    /// <param name="byteCount">The number of bytes to process.</param>
-    /// <exception cref="NotImplementedException"></exception>
-    private void CodeSomeShards(sbyte[][] matrixRows,
-                             sbyte[][] inputs,
-                             sbyte[][] outputs,
-                            int outputCount,
-                            int offset,
-                            int byteCount)
-    {
-        // This is the inner loop.  It needs to be fast.  Be careful
-        // if you change it.
-        //
-        // Note that dataShardCount is final in the class, so the
-        // compiler can load it just once, before the loop.  Explicitly
-        // adding a local variable does not make it faster.
-        //
-        // I have tried inlining Galois.multiply(), but it doesn't
-        // make things any faster.  The JIT compiler is known to inline
-        // methods, so it's probably already doing so.
-        //
-        // This method has been timed and compared with a C implementation.
-        // This Java version is only about 10% slower than C.
-
-        for (int iByte = offset; iByte < offset + byteCount; iByte++)
-        {
-            for (int iRow = 0; iRow < outputCount; iRow++)
+            for (var otherShardIndex = 0; otherShardIndex < parityShardIndex; otherShardIndex++)
             {
-                sbyte[] matrixRow = matrixRows[iRow];
-                int value = 0;
-                for (int c = 0; c < this.DataShardCount; c++)
+                if (ReferenceEquals(shards[parityShardIndex], shards[otherShardIndex]))
                 {
-                    value ^= Galois.Multiply(matrixRow[c], inputs[c][iByte]);
-                }
-                outputs[iRow][iByte] = (sbyte)value;
-            }
-        }
-    }
-
-    /// <summary>
-    ///  Multiplies a subset of rows from a coding matrix by a full set of <br/>
-    ///  input shards to produce some output shards, and checks that the <br/>
-    ///  the data is those shards matches what's expected.
-    /// </summary>
-    /// <param name="matrixRows">The rows from the matrix to use.</param>
-    /// <param name="inputs"> An array of byte arrays, each of which is one input shard. <br/>
-    /// The inputs array may have extra buffers after the ones <br/>
-    /// that are used.They will be ignored.The number of <br/>
-    /// inputs used is determined by the length of the <br/>
-    /// each matrix row.</param>
-    /// <param name="toCheck">Byte arrays where the computed shards are stored.
-    /// The outputs array may also have extra, unused, elements <br/>
-    /// at the end.The number of outputs computed, and the <br/>
-    /// number of matrix rows used, is determined by <br/>
-    /// outputCount.</param>
-    /// <param name="checkCount">The number of outputs to compute.</param>
-    /// <param name="offset">The index in the inputs and output of the first byte
-    /// to process.</param>
-    /// <param name="byteCount">The number of bytes to process.</param>
-    /// <returns></returns>
-    /// <exception cref="NotImplementedException"></exception>
-    private bool CheckSomeShards(sbyte[][] matrixRows,
-                                sbyte[][] inputs,
-                                sbyte[][] toCheck,
-                                int checkCount,
-                                int offset,
-                                int byteCount)
-    {
-        // This is the inner loop.  It needs to be fast.  Be careful
-        // if you change it.
-        //
-        // Note that dataShardCount is final in the class, so the
-        // compiler can load it just once, before the loop.  Explicitly
-        // adding a local variable does not make it faster.
-        //
-        // I have tried inlining Galois.multiply(), but it doesn't
-        // make things any faster.  The JIT compiler is known to inline
-        // methods, so it's probably already doing so.
-        //
-        // This method has been timed and compared with a C implementation.
-        // This Java version is only about 10% slower than C.
-
-        for (int iByte = offset; iByte < offset + byteCount; iByte++)
-        {
-            for (int iRow = 0; iRow < checkCount; iRow++)
-            {
-                sbyte[] matrixRow = matrixRows[iRow];
-                int value = 0;
-                for (int c = 0; c < this.DataShardCount; c++)
-                {
-                    value ^= Galois.Multiply(matrixRow[c], inputs[c][iByte]);
-                }
-                if (toCheck[iRow][iByte] != (sbyte)value)
-                {
-                    return false;
+                    throw CreateBufferSharingException(parityShardIndex, otherShardIndex);
                 }
             }
         }
-        return true;
     }
 
-    /// <summary>
-    /// Create the matrix to use for encoding, given the number of <br/>
-    /// data shards and the number of total shards. <br/>
-    ///<br/>
-    /// The top square of the matrix is guaranteed to be an identity <br/>
-    /// matrix, which means that the data shards are unchanged after encoding.
-    /// </summary>
-    /// <param name="dataShards"></param>
-    /// <param name="totalShards"></param>
-    /// <returns></returns>
-    private static Matrix BuildMatrix(int dataShards, int totalShards)
+    // These messages stay outside the inlined validation so successful calls do not carry their formatting code.
+    private ArgumentException CreateWorkspaceMismatchException(byte[][] shards, ReadOnlySpan<bool> present, DecodeWorkspace workspace)
     {
-        // Start with a Vandermonde matrix.  This matrix would work,
-        // in theory, but doesn't have the property that the data
-        // shards are unchanged after encoding.
-        Matrix vandermonde = Vandermonde(totalShards, dataShards);
-
-        // Multiple by the inverse of the top square of the matrix.
-        // This will make the top square be the identity matrix, but
-        // preserve the property that any square subset of rows  is
-        // invertible.
-        Matrix top = vandermonde.Submatrix(0, 0, dataShards, dataShards);
-        return vandermonde.Times(top.Invert());
+        return new ArgumentException(
+            $"Expected {shards.Length} presence flags and a workspace for {dataShardCount} data and {parityShardCount} parity shards, "
+            + $"but got {present.Length} flags and a workspace for {workspace.Inputs.Length} data and {workspace.Outputs.Length} parity shards.");
     }
 
-    /// <summary>
-    /// Create a Vandermonde matrix, which is guaranteed to have the <br/>
-    /// property that any subset of rows that forms a square matrix <br/>
-    /// is invertible.
-    /// </summary>
-    /// <param name="rows">Number of rows in the result.</param>
-    /// <param name="cols">Number of columns in the result.</param>
-    /// <returns>A Matrix.</returns>
-    private static Matrix Vandermonde(int rows, int cols)
+    private static ArgumentException CreateBufferSharingException(int shardIndex, int otherShardIndex)
     {
-        Matrix result = new Matrix(rows, cols);
-        for (int r = 0; r < rows; r++)
-        {
-            for (int c = 0; c < cols; c++)
-            {
-                result.Set(r, c, Galois.Exp((sbyte)r, c));
-            }
-        }
-        return result;
+        return new ArgumentException($"Writable shard {shardIndex} must not share its buffer with shard {otherShardIndex}.");
     }
-}
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void CombineRows(byte[][] coefficients, ReadOnlySpan<byte[]> inputs, ReadOnlySpan<byte[]> outputs)
+    {
+        ShardCoding.CombineRows(this, coefficients, inputs, outputs);
+    }
 }

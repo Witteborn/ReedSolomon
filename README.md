@@ -1,219 +1,161 @@
-# Reed-Solomon Algorithm Implementation
+# Reed-Solomon for .NET
 
-This project is a C# implementation of the Reed-Solomon error correction algorithm, based on Backblaze's original Java implementation. The library provides robust error correction capabilities and includes comprehensive unit tests.
-
-## Description
-
-This implementation simplifies integration of Reed-Solomon error correction into your applications.
-
-If you find this project helpful, please consider starring it and sharing it with others.
-
-## Installation
-
-To install the Reed-Solomon library, simply add it to your project using NuGet Package Manager:
+Reed-Solomon erasure coding for .NET. The codec splits data into data shards and adds parity
+shards. When shards are lost, the original data can be restored as long as no more shards are
+missing than there are parity shards.
 
 ```bash
-Install-Package Witteborn.ReedSolomon
+dotnet add package ReedSolomon
 ```
 
-## Usage
+The library requires .NET 10 and uses AVX2 or ARM64 NEON when the hardware supports them. A codec
+supports up to 256 shards in total.
 
-Using the Reed-Solomon library is straightforward. Here's a simple example of how to encode and decode data:
-
-### Managed Example: Byte
+## Quick start
 
 ```csharp
-Console.WriteLine("Managed Example SByte");
-Console.WriteLine("---------------------");
-const int dataShardCount = 4;
+using Witteborn.ReedSolomon;
+
+const int dataShardCount = 10;
 const int parityShardCount = 2;
 
-// Initialize Reed-Solomon with data shards and parity shards
-ReedSolomon rs = new ReedSolomon(dataShardCount, parityShardCount);
+var codec = new ReedSolomon(dataShardCount, parityShardCount);
+var originalData = File.ReadAllBytes("input.bin");
 
-// Example data to encode
-byte[] data = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
-Console.WriteLine("Data:");
-Console.WriteLine(string.Join(" ", data));
-var paddingSize = rs.GetPaddingSize(data.Length);
-Console.WriteLine("Padding size: " + paddingSize);
+var encodedShards = codec.ManagedEncode(originalData);
+var paddingSize = encodedShards[0].Length * dataShardCount - originalData.Length;
 
-// Encode the data using ManagedEncode to produce shards
-var shards = rs.ManagedEncode(data);
+// Later, mark every lost shard with null.
+byte[]?[] shards = encodedShards;
+shards[0] = null;
+shards[dataShardCount - 1] = null;
 
-Console.WriteLine("Encoded Data:");
-
-foreach (var shard in shards)
-{
-    Console.WriteLine(string.Join(" ", shard));
-}
-
-// Simulate loss of one shard 
-shards[1] = null;
-
-Console.WriteLine("Encoded with missing Data:");
-foreach (var shard in shards)
-{
-    if (shard == null)
-    {
-        Console.WriteLine("null");
-    }
-    else
-    {
-        Console.WriteLine(string.Join(" ", shard));
-    }
-}
-
-// Decode the remaining shards using ManagedDecode to recover original data
-var decodedData = rs.ManagedDecode(shards, paddingSize: paddingSize);
-
-Console.WriteLine("Decoded data:");
-Console.WriteLine(string.Join(" ", decodedData));
-
+var recoveredData = codec.ManagedDecode(shards, paddingSize);
 ```
 
-### Managed Example: SByte
+`ManagedEncode` splits nonempty input into equal-length data shards, zero-pads the last ones and
+returns the data shards followed by the parity shards. `ManagedDecode` restores the missing data
+shards in the given array and returns the original data without padding. Missing parity shards stay
+`null`.
+
+A lost shard is always `null`. A shard that contains only zeroes is valid data and is never treated
+as lost.
+
+## What you need to store
+
+The codec stores no metadata. To recover data later, keep:
+
+- the data shard count and the parity shard count
+- the index of every shard, because shards are not interchangeable
+- the padding size or the original data length
+- a checksum for every shard
+
+The codec does not detect corrupted bytes. Check each shard against its checksum and pass a shard
+that fails the check as `null`.
+
+## Upgrading from 1.x or 2.x
+
+Shards stored by any published version stay valid and do not need to be re-encoded. The API changed
+in version 3, and lost shards must now be `null` instead of zero-filled. The
+[upgrade guide](https://github.com/Witteborn/ReedSolomon/blob/master/UPGRADING.md) lists every change
+and its replacement.
+
+## Reusing buffers
+
+For repeated operations, allocate equal-length, nonempty buffers once. The first `dataShardCount`
+buffers hold data, and the remaining buffers receive parity.
 
 ```csharp
-Console.WriteLine("Managed Example SByte");
-Console.WriteLine("---------------------");
-const int dataShardCount = 4;
+const int dataShardCount = 10;
 const int parityShardCount = 2;
+const int shardCount = dataShardCount + parityShardCount;
+const int shardSizeBytes = 8192;
 
-// Initialize Reed-Solomon with data shards and parity shards
-ReedSolomon rs = new ReedSolomon(dataShardCount, parityShardCount);
+var codec = new ReedSolomon(dataShardCount, parityShardCount);
+var workspace = new DecodeWorkspace(dataShardCount, parityShardCount);
+var shards = Enumerable.Range(0, shardCount)
+    .Select(_ => new byte[shardSizeBytes])
+    .ToArray();
 
-// Example data to encode
-sbyte[] data = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
-Console.WriteLine("Data:");
-Console.WriteLine(string.Join(" ", data));
-var paddingSize = rs.GetPaddingSize(data.Length);
-Console.WriteLine("Padding size: " + paddingSize);
+// Fill the data shards with the payload before encoding.
+codec.EncodeParity(shards);
 
-// Encode the data using ManagedEncode to produce shards
-var shards = rs.ManagedEncode(data, dataShardCount, parityShardCount);
+var shardPresence = Enumerable.Repeat(element: true, shardCount).ToArray();
 
-Console.WriteLine("Encoded Data:");
+shardPresence[0] = false;
+shardPresence[dataShardCount - 1] = false;
 
-foreach (var shard in shards)
-{
-    Console.WriteLine(string.Join(" ", shard));
-}
-
-// Simulate loss of one shard 
-shards[1] = null;
-
-Console.WriteLine("Encoded with missing Data:");
-foreach (var shard in shards)
-{
-    if (shard == null)
-    {
-        Console.WriteLine("null");
-    }
-    else
-    {
-        Console.WriteLine(string.Join(" ", shard));
-    }
-}
-
-// Decode the remaining shards using ManagedDecode to recover original data
-var decodedData = rs.ManagedDecode(shards, dataShardCount, parityShardCount, paddingSize: paddingSize);
-
-Console.WriteLine("Decoded data:");
-Console.WriteLine(string.Join(" ", decodedData));
+codec.ReconstructDataInto(shards, shardPresence, workspace);
 ```
 
-### Manual Example: SByte
+Reconstruction writes only the missing data shards. Their buffers must stay allocated, and their
+previous contents do not matter. Presence flags and parity shards stay unchanged. To rebuild lost
+parity, call `EncodeParity` once all data shards are restored. Two shards must never share a buffer.
+
+Once warm, `EncodeParity` and `ReconstructDataInto` do not allocate.
+
+## Concurrency
+
+A codec can be shared by several threads that use separate buffers. Every concurrent worker needs its
+own `DecodeWorkspace` with the codec's shard counts.
+
+## Performance and tuning
+
+As a reference value, encoding parity for 420 MiB with 10 data and 2 parity shards takes about 32 ms
+on one logical processor of an AMD Ryzen 9 5950X. Timings depend on the hardware.
+[`validation/compatibility`](https://github.com/Witteborn/ReedSolomon/tree/master/validation/compatibility)
+measures them on your own machine.
 
 ```csharp
-Console.WriteLine("Example SByte");
-Console.WriteLine("-------------");
-
-const int dataShardCount = 4;
+const int dataShardCount = 10;
 const int parityShardCount = 2;
-const int shardSize = 4;
+const int blockSizeBytes = 32768;
+const int unrollFactor = 4;
 
-// Create the shards array with data and empty parity shards
-sbyte[][] shards =
-{
-    new sbyte[] { 0, 1, 2, 3 },
-    new sbyte[] { 4, 5, 6, 7 },
-    new sbyte[] { 8, 9, 10, 11 },
-    new sbyte[] { 12, 13, 14, 15 },
-    new sbyte[shardSize], // Parity shard 1
-    new sbyte[shardSize]  // Parity shard 2
-};
-
-Console.WriteLine("Shards:");
-foreach (var shard in shards)
-{
-    Console.WriteLine(string.Join(" ", shard));
-}
-
-// Initialize Reed-Solomon with data shards and parity shards
-ReedSolomon rs = new ReedSolomon(dataShardCount, parityShardCount);
-
-// Encode the data with Reed-Solomon to generate parity shards
-rs.EncodeParity(shards, 0, shardSize);
-
-Console.WriteLine("Encoded data:");
-foreach (var shard in shards)
-{
-    Console.WriteLine(string.Join(" ", shard));
-}
-
-// Simulate loss of one shard (e.g., network transmission loss)
-shards[1] = null; // Simulating the shard is lost
-
-Console.WriteLine("Encoded with missing Data:");
-foreach (var shard in shards)
-{
-    if (shard == null)
-    {
-        Console.WriteLine("null");
-    }
-    else
-    {
-        Console.WriteLine(string.join(" ", shard));
-    }
-}
-
-bool[] shardPresent = shards.Select(shard => shard != null).ToArray();
-
-//Manual null fix
-for (int i = 0; i < shards.Length; i++)
-{
-    if (shards[i] == null)
-    {
-        shards[i] = new sbyte[shardSize];
-    }
-}
-
-// Decode the remaining shards to recover original data
-rs.DecodeMissing(shards, shardPresent, 0, shardSize);
-
-// Print the decoded data (should match original data)
-Console.WriteLine("Decoded data:");
-foreach (var shard in shards.Where(s => s != null))
-{
-    Console.WriteLine(string.Join(" ", shard));
-}
+var scalarCodec = new ReedSolomon(dataShardCount, parityShardCount, simd: false);
+var tunedCodec = new ReedSolomon(
+    dataShardCount,
+    parityShardCount,
+    blockSize: blockSizeBytes,
+    unroll: unrollFactor);
 ```
 
-## Contribution
+`simd: false` forces the scalar code path. `blockSize` is a positive multiple of 64 bytes and
+defaults to 8192. `unroll` accepts 1, 2 or 4 and defaults to 1. Change these settings only after
+measuring your own workload.
 
-Contributions via pull requests are welcome. Please open an issue first and review our [Contribution Guidelines](./CONTRIBUTING.md) and [Code of Conduct](./CODE_OF_CONDUCT.md).
+## Development
 
-## Support
+Building the repository requires the .NET 10 SDK.
 
-For assistance, refer to our [Support](./SUPPORT.md) file.
+```bash
+dotnet build ReedSolomon/ReedSolomon.slnx -c Release
+dotnet test ReedSolomon/ReedSolomonTests/ReedSolomonTests.csproj -c Release
+dotnet test ReedSolomon/ReedSolomonTests/ReedSolomonTests.csproj -c Release --environment DOTNET_EnableHWIntrinsic=0
+dotnet run --project ReedSolomon/ReadmeExample -c Release
+```
 
-## Security
+The second test run disables hardware intrinsics and covers the scalar code path. The tests check
+every possible loss pattern for 1 to 6 data shards combined with 1 to 6 parity shards through both
+decoding APIs, with and without SIMD. Larger and randomized cases go up to 256 shards.
 
-To report security issues or vulnerabilities, refer to our [Security](./SECURITY.md) file.
+Two tools compare the codec with other implementations:
 
-## Acknowledgments
+```bash
+dotnet run --project validation/performance/Validation.csproj -c Release
+bash validation/compatibility/run.sh
+```
 
-- **Backblaze** for the original Java implementation that inspired this project.
+The first compares encoded and reconstructed bytes and timings with a separate reference
+implementation. The second compares shard bytes, behavior and performance with every published
+package.
 
-And a big **Thank You** to all contributors, issue reporters, and supporters who have helped make this project possible.
+## License
+
+MIT, see [LICENSE](https://github.com/Witteborn/ReedSolomon/blob/master/LICENSE). To report a
+security issue, follow [SECURITY.md](https://github.com/Witteborn/ReedSolomon/blob/master/SECURITY.md).
+
+The very first version of this library was a C# port of
+[Backblaze's JavaReedSolomon](https://github.com/Backblaze/JavaReedSolomon) by Gökhan Witteborn.
+Since then, the implementation has been changed significantly to make it much faster and more
+robust, while the encoded data stays compatible. Thanks to Backblaze for publishing the original.

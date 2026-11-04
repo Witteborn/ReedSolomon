@@ -1,27 +1,24 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 
-namespace Witteborn.ReedSolomon
-{
+namespace Witteborn.ReedSolomon;
+
 /// <summary>
 ///  8-bit Galois Field
 ///
 /// This class implements multiplication, division, addition,
 /// subtraction, and exponentiation.
 ///
-/// The multiplication operation is in the inner loop of
-/// erasure coding, so it's been optimized.  Having the
-/// class be "final" helps a little, and having the EXP_TABLE
-/// repeat the data, so there's no need to bound the sum
-/// of two logarithms to 255 helps a lot.
+/// Multiplication uses logarithm and exponent lookup tables.
 /// </summary>
 public class Galois
 {
+    private const int MultiplicativeGroupOrder = FIELD_SIZE - 1;
+    private const int FieldElementMask = FIELD_SIZE - 1;
     /// <summary>
     /// The number of elements in the field.
     /// </summary>
     public const int FIELD_SIZE = 256;
-
     /// <summary>
     /// The polynomial used to generate the logarithm table.
     ///
@@ -34,16 +31,26 @@ public class Galois
     /// </summary>
     public const int GENERATING_POLYNOMIAL = 29;
 
-    private static short[] LOG_TABLE => GaloisTables.LOG_TABLE;
-    private static sbyte[] EXP_TABLE => GaloisTables.EXP_TABLE;
+    private static short[] Logarithms
+    {
+        get
+        {
+            return GaloisTables.LOG_TABLE;
+        }
+    }
+
+    private static sbyte[] Exponents
+    {
+        get
+        {
+            return GaloisTables.EXP_TABLE;
+        }
+    }
 
     /// <summary>
     /// Adds two elements of the field.  If you're in an inner loop,
     /// you should inline this function: it's just XOR.
     /// </summary>
-    /// <param name="a"></param>
-    /// <param name="b"></param>
-    /// <returns></returns>
     public static sbyte Add(sbyte a, sbyte b)
     {
         return (sbyte)(a ^ b);
@@ -53,9 +60,6 @@ public class Galois
     /// Inverse of addition.  If you're in an inner loop,
     /// you should inline this function: it's just XOR.
     /// </summary>
-    /// <param name="a"></param>
-    /// <param name="b"></param>
-    /// <returns></returns>
     public static sbyte Subtract(sbyte a, sbyte b)
     {
         return (sbyte)(a ^ b);
@@ -64,28 +68,25 @@ public class Galois
     /// <summary>
     /// Multiplies to elements of the field.
     /// </summary>
-    /// <param name="a"></param>
-    /// <param name="b"></param>
-    /// <returns></returns>
     public static sbyte Multiply(sbyte a, sbyte b)
     {
-        if (a == 0 || b == 0)
+        var hasZeroOperand = a == 0 || b == 0;
+
+        if (hasZeroOperand)
         {
             return 0;
         }
 
-        int logA = LOG_TABLE[a & 0xFF];
-        int logB = LOG_TABLE[b & 0xFF];
-        int logResult = logA + logB;
-        return EXP_TABLE[logResult];
+        var firstLogarithm = (int)Logarithms[a & FieldElementMask];
+        var secondLogarithm = (int)Logarithms[b & FieldElementMask];
+        var resultLogarithm = firstLogarithm + secondLogarithm;
+
+        return Exponents[resultLogarithm];
     }
 
     /// <summary>
     /// Inverse of multiplication.
     /// </summary>
-    /// <param name="a"></param>
-    /// <param name="b"></param>
-    /// <returns></returns>
     /// <exception cref="ArgumentException"></exception>
     public static sbyte Divide(sbyte a, sbyte b)
     {
@@ -99,16 +100,16 @@ public class Galois
             throw new ArgumentException("Argument 'divisor' is 0");
         }
 
-        int logA = LOG_TABLE[a & 0xFF];
-        int logB = LOG_TABLE[b & 0xFF];
-        int logResult = logA - logB;
+        var firstLogarithm = (int)Logarithms[a & FieldElementMask];
+        var secondLogarithm = (int)Logarithms[b & FieldElementMask];
+        var resultLogarithm = firstLogarithm - secondLogarithm;
 
-        if (logResult < 0)
+        if (resultLogarithm < 0)
         {
-            logResult += 255;
+            resultLogarithm += MultiplicativeGroupOrder;
         }
 
-        return EXP_TABLE[logResult];
+        return Exponents[resultLogarithm];
     }
 
     /// <summary>
@@ -125,63 +126,74 @@ public class Galois
         {
             return 1;
         }
-        else if (a == 0)
+
+        if (a == 0)
         {
             return 0;
         }
 
-        int logA = LOG_TABLE[a & 0xFF];
-        int logResult = logA * n;
-        logResult %= 255;
+        var firstLogarithm = (int)Logarithms[a & FieldElementMask];
+        var resultLogarithm = firstLogarithm * n;
 
-        return EXP_TABLE[logResult];
+        resultLogarithm %= MultiplicativeGroupOrder;
+
+        return Exponents[resultLogarithm];
     }
 
     /// <summary>
     /// Generates a logarithm table given a starting polynomial.
     /// </summary>
-    /// <param name="polynomial"></param>
-    /// <returns></returns>
     /// <exception cref="InvalidOperationException"></exception>
     public static short[] GenerateLogTable(int polynomial)
     {
-        short[] result = new short[FIELD_SIZE];
-        for (int i = 0; i < FIELD_SIZE; i++)
+        const short unassignedLogarithm = -1;
+
+        var logarithms = new short[FIELD_SIZE];
+
+        for (var fieldElementIndex = 0; fieldElementIndex < FIELD_SIZE; fieldElementIndex++)
         {
-            result[i] = -1; // -1 means "not set"
+            logarithms[fieldElementIndex] = unassignedLogarithm;
         }
-        int b = 1;
-        for (int log = 0; log < FIELD_SIZE - 1; log++)
+
+        var fieldElement = 1;
+
+        for (var exponent = 0; exponent < FIELD_SIZE - 1; exponent++)
         {
-            if (result[b] != -1)
+            if (logarithms[fieldElement] != unassignedLogarithm)
             {
                 throw new InvalidOperationException("Duplicate logarithm detected (invalid polynomial: " + polynomial + ")");
             }
-            result[b] = (short)log;
-            b = b << 1;
-            if (FIELD_SIZE <= b)
+
+            logarithms[fieldElement] = (short)exponent;
+            fieldElement = fieldElement << 1;
+
+            if (FIELD_SIZE <= fieldElement)
             {
-                b = b - FIELD_SIZE ^ polynomial;
+                fieldElement = fieldElement - FIELD_SIZE ^ polynomial;
             }
         }
-        return result;
+
+        return logarithms;
     }
 
     /// <summary>
     /// Generates the inverse log table.
     /// </summary>
-    /// <param name="logTable"></param>
-    /// <returns></returns>
     public static sbyte[] GenerateExpTable(short[] logTable)
     {
-        sbyte[] result = new sbyte[FIELD_SIZE * 2 - 2];
-        for (int i = 1; i < FIELD_SIZE; i++)
+        const int repeatedLookupCycles = 2;
+
+        var exponents = new sbyte[repeatedLookupCycles * MultiplicativeGroupOrder];
+
+        for (var fieldElement = 1; fieldElement < FIELD_SIZE; fieldElement++)
         {
-            int log = logTable[i];
-            result[log] = (sbyte)i;
-            result[log + FIELD_SIZE - 1] = (sbyte)i;
+            var exponent = (int)logTable[fieldElement];
+
+            exponents[exponent] = (sbyte)fieldElement;
+            exponents[exponent + FIELD_SIZE - 1] = (sbyte)fieldElement;
         }
-        return result;
+
+        return exponents;
     }
 
     /// <summary>
@@ -190,16 +202,16 @@ public class Galois
     ///
     /// This is never used in the code; it's just here for completeness.
     /// </summary>
-    /// <returns></returns>
     public static int[] AllPossiblePolynomials()
     {
-        List<int> result = new List<int>();
-        for (int i = 0; i < FIELD_SIZE; i++)
+        var validPolynomials = new List<int>();
+
+        for (var polynomial = 0; polynomial < FIELD_SIZE; polynomial++)
         {
             try
             {
-                GenerateLogTable(i);
-                result.Add(i);
+                GenerateLogTable(polynomial);
+                validPolynomials.Add(polynomial);
             }
             catch (InvalidOperationException)
             {
@@ -207,7 +219,6 @@ public class Galois
             }
         }
 
-        return result.ToArray();
+        return validPolynomials.ToArray();
     }
-}
 }

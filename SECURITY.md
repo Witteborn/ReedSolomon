@@ -1,9 +1,7 @@
 # Security
 
-## Please dont open an issue for vulnerabilities or security concerns, contact us instead!
+Please do not open a public issue for a vulnerability or another security concern. Report it by email
+to [goekhan@witteborn.dev](mailto:goekhan@witteborn.dev) instead.
 
-Contacting us instead of publishing security issues helps us to fix the issue without further damage. We take security issues very seriously and will fix them as soon as possible.
-
-
-You can contact us at 
-## Witteborn@protonmail.com
+Reporting privately gives us the chance to fix the problem before it can cause harm. We take security
+reports seriously and will fix confirmed issues as soon as possible.
