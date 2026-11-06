@@ -59,3 +59,48 @@ if (recoveredData.AsSpan().SequenceEqual(data) == false)
 }
 
 Console.WriteLine($"Workspace recovery: {string.Join(" ", recoveredData)}");
+
+// Memory ranges let one buffer set serve chunks of different lengths, each shard behind a header byte.
+const int headerSizeBytes = 1;
+const int maximumShardLength = 5;
+
+var storedShards = Enumerable.Range(0, dataShardCount + parityShardCount)
+    .Select(_ => new byte[headerSizeBytes + maximumShardLength])
+    .ToArray();
+
+foreach (var chunk in new[] { data, data[..9] })
+{
+    var chunkShardLength = (chunk.Length + dataShardCount - 1) / dataShardCount;
+    var ranges = storedShards
+        .Select(storedShard => storedShard.AsMemory(headerSizeBytes, chunkShardLength))
+        .ToArray();
+
+    // Data ranges still hold the previous chunk, so each one is cleared before the chunk bytes are copied in.
+    for (var shardIndex = 0; shardIndex < dataShardCount; shardIndex++)
+    {
+        var chunkOffset = Math.Min(chunk.Length, shardIndex * chunkShardLength);
+        var chunkByteCount = Math.Min(chunkShardLength, chunk.Length - chunkOffset);
+        var dataRange = ranges[shardIndex].Span;
+
+        dataRange.Clear();
+        chunk.AsSpan(chunkOffset, chunkByteCount).CopyTo(dataRange);
+    }
+
+    codec.EncodeParity(ranges);
+    ranges[0].Span.Fill(firstDirtyBufferValue);
+    ranges[2].Span.Fill(secondDirtyBufferValue);
+    codec.ReconstructDataInto(ranges, shardPresence, workspace);
+
+    var rangeData = ranges
+        .Take(dataShardCount)
+        .SelectMany(range => range.ToArray())
+        .Take(chunk.Length)
+        .ToArray();
+
+    if (rangeData.AsSpan().SequenceEqual(chunk) == false)
+    {
+        throw new Exception("Memory range recovery failed.");
+    }
+
+    Console.WriteLine($"Memory range recovery: {string.Join(" ", rangeData)}");
+}

@@ -1,4 +1,4 @@
-#if PUBLISHED_CODEC == false
+#if LEGACY_BUFFER_API == false
 using Witteborn.ReedSolomon;
 #endif
 
@@ -7,12 +7,13 @@ namespace CompatibilityValidation;
 /// <summary>Hides the API differences between the local codec and the published packages.</summary>
 /// <remarks>
 /// The same probe source is compiled once per codec version, so every version runs identical checks.
-/// Every published version offers the signed-byte buffer API; version 2.0.0 also offers unsigned overloads.
+/// Versions before 3.0.0 offer the signed-byte buffer API; version 2.0.0 also offers unsigned overloads.
+/// Version 3.0.0 and the working tree share the current API.
 /// </remarks>
 internal sealed class CodecUnderTest
 {
     private readonly Codec codec;
-#if PUBLISHED_CODEC == false
+#if LEGACY_BUFFER_API == false
     private readonly DecodeWorkspace workspace;
 #endif
 #if SIGNED_MANAGED_ENCODE
@@ -23,7 +24,7 @@ internal sealed class CodecUnderTest
     internal CodecUnderTest(int dataShardCount, int parityShardCount)
     {
         codec = new Codec(dataShardCount, parityShardCount);
-#if PUBLISHED_CODEC == false
+#if LEGACY_BUFFER_API == false
         workspace = new DecodeWorkspace(dataShardCount, parityShardCount);
 #endif
 #if SIGNED_MANAGED_ENCODE
@@ -34,9 +35,9 @@ internal sealed class CodecUnderTest
 
     internal void EncodeParity(byte[][] shards)
     {
-#if PUBLISHED_CODEC && MANAGED_BYTE_API
+#if LEGACY_BUFFER_API && MANAGED_BYTE_API
         codec.EncodeParity(shards, 0, shards[0].Length);
-#elif PUBLISHED_CODEC
+#elif LEGACY_BUFFER_API
         var signedShards = ToSignedShards(shards);
 
         codec.EncodeParity(signedShards, 0, shards[0].Length);
@@ -48,9 +49,9 @@ internal sealed class CodecUnderTest
 
     internal void RestoreData(byte[][] shards, bool[] present)
     {
-#if PUBLISHED_CODEC && MANAGED_BYTE_API
+#if LEGACY_BUFFER_API && MANAGED_BYTE_API
         codec.DecodeMissing(shards, present, 0, shards[0].Length);
-#elif PUBLISHED_CODEC
+#elif LEGACY_BUFFER_API
         var signedShards = ToSignedShards(shards);
 
         codec.DecodeMissing(signedShards, present, 0, shards[0].Length);
@@ -84,7 +85,7 @@ internal sealed class CodecUnderTest
     }
 #endif
 
-#if PUBLISHED_CODEC && MANAGED_BYTE_API == false
+#if LEGACY_BUFFER_API && MANAGED_BYTE_API == false
     private static sbyte[][] ToSignedShards(byte[][] shards)
     {
         return Array.ConvertAll(

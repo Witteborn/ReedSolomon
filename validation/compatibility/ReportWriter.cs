@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Xml.Linq;
 
 namespace CompatibilityValidation;
 
@@ -8,7 +9,8 @@ namespace CompatibilityValidation;
 internal static class ReportWriter
 {
     private const string LocalVersion = "local";
-    private const string ComparedManagedVersion = "2.0.0";
+    // The last release of the old API and the first release of the current API.
+    private static readonly string[] ComparedVersions = ["2.0.0", "3.0.0"];
 
     internal static void Write(string resultsDirectory, string outputPath)
     {
@@ -29,6 +31,7 @@ internal static class ReportWriter
         AppendFormat(markdown, reports, localReport);
         AppendManaged(markdown, reports, localReport);
         AppendBehaviors(markdown, reports, localReport);
+        AppendApiDifferences(markdown, resultsDirectory);
         AppendPerformance(markdown, Path.Combine(resultsDirectory, "performance.jsonl"));
 
         File.WriteAllText(outputPath, markdown.ToString());
@@ -84,7 +87,6 @@ internal static class ReportWriter
 
     private static void AppendManaged(StringBuilder markdown, CompatibilityReport[] reports, CompatibilityReport localReport)
     {
-        var publishedReport = reports.Single(report => report.CodecVersion == ComparedManagedVersion);
         var localHashes = localReport.ManagedCases.ToDictionary(managedCase => managedCase.Case, managedCase => managedCase.ShardsHash);
 
         markdown.AppendLine("## Allocating API");
@@ -107,7 +109,7 @@ internal static class ReportWriter
         markdown.AppendLine("| Version | Loss patterns | Payload restored | Rejected with an exception | Wrong bytes |");
         markdown.AppendLine("|---|---:|---:|---:|---:|");
 
-        foreach (var report in new[] { publishedReport, localReport })
+        foreach (var report in FindComparedReports(reports).Append(localReport))
         {
             var lossPatternCount = report.ManagedCases.Sum(managedCase => managedCase.LossPatternCount);
             var restoredCount = report.ManagedCases.Sum(managedCase => managedCase.RestoredPatternCount);
@@ -122,23 +124,64 @@ internal static class ReportWriter
 
     private static void AppendBehaviors(StringBuilder markdown, CompatibilityReport[] reports, CompatibilityReport localReport)
     {
-        var publishedReport = reports.Single(report => report.CodecVersion == ComparedManagedVersion);
-        var localObservations = localReport.Behaviors.ToDictionary(behavior => behavior.Scenario, behavior => behavior.Observation);
+        var comparedReports = FindComparedReports(reports);
+        var comparedObservations = comparedReports
+            .Select(report => report.Behaviors.ToDictionary(behavior => behavior.Scenario, behavior => behavior.Observation))
+            .ToArray();
+        var versionColumns = string.Join(" | ", comparedReports.Select(report => report.CodecVersion));
+        var sameColumns = string.Join(" | ", comparedReports.Select(report => $"Same as {report.CodecVersion}"));
+        var alignmentColumns = string.Concat(Enumerable.Repeat("---|", 2 * comparedReports.Length + 2));
 
         markdown.AppendLine("## Caller-visible behavior");
         markdown.AppendLine();
-        markdown.AppendLine($"| Scenario | {ComparedManagedVersion} | Current | Same |");
-        markdown.AppendLine("|---|---|---|---|");
+        markdown.AppendLine($"| Scenario | {versionColumns} | Current | {sameColumns} |");
+        markdown.AppendLine($"|{alignmentColumns}");
 
-        foreach (var behavior in publishedReport.Behaviors)
+        foreach (var behavior in localReport.Behaviors)
         {
-            var localObservation = localObservations[behavior.Scenario];
-            var isSame = localObservation == behavior.Observation ? "yes" : "**no**";
+            var observations = comparedObservations.Select(observationsByScenario => observationsByScenario[behavior.Scenario]);
+            var sameMarks = observations.Select(observation => observation == behavior.Observation ? "yes" : "**no**");
 
-            markdown.AppendLine($"| {behavior.Scenario} | {behavior.Observation} | {localObservation} | {isSame} |");
+            markdown.AppendLine(
+                $"| {behavior.Scenario} | {string.Join(" | ", observations)} | {behavior.Observation} | {string.Join(" | ", sameMarks)} |");
         }
 
         markdown.AppendLine();
+    }
+
+    private static void AppendApiDifferences(StringBuilder markdown, string resultsDirectory)
+    {
+        markdown.AppendLine("## Public API");
+        markdown.AppendLine();
+        markdown.AppendLine("Differences found by the SDK's package validation, by diagnostic. The XML files list each one.");
+        markdown.AppendLine();
+        markdown.AppendLine("| Compared with | Differences |");
+        markdown.AppendLine("|---|---|");
+
+        foreach (var comparedVersion in ComparedVersions)
+        {
+            var differencesPath = Path.Combine(resultsDirectory, $"api-differences-to-{comparedVersion}.xml");
+
+            // Package validation writes no file when the public API is unchanged.
+            var differences = File.Exists(differencesPath)
+                ? DescribeApiDifferences(differencesPath)
+                : "none";
+
+            markdown.AppendLine($"| {comparedVersion} | {differences} |");
+        }
+
+        markdown.AppendLine();
+    }
+
+    private static string DescribeApiDifferences(string differencesPath)
+    {
+        var differenceCounts = XDocument.Load(differencesPath)
+            .Descendants("DiagnosticId")
+            .GroupBy(diagnostic => diagnostic.Value)
+            .OrderBy(diagnostics => diagnostics.Key, StringComparer.Ordinal)
+            .Select(diagnostics => $"{diagnostics.Count()} {diagnostics.Key}");
+
+        return string.Join(", ", differenceCounts);
     }
 
     private static void AppendPerformance(StringBuilder markdown, string performancePath)
@@ -154,30 +197,48 @@ internal static class ReportWriter
         var cells = measurements
             .GroupBy(measurement => (measurement.Operation, measurement.PayloadBytes))
             .OrderBy(cell => cell.Key.PayloadBytes)
-            .ThenBy(cell => cell.Key.Operation, StringComparer.Ordinal);
+            .ThenBy(cell => cell.Key.Operation, StringComparer.Ordinal)
+            .ToArray();
 
         markdown.AppendLine("## Performance");
         markdown.AppendLine();
         markdown.AppendLine("10 data and 2 parity shards, one logical processor, default codec settings. Each value is");
         markdown.AppendLine("the median over fresh processes of each process's median batch. The range shows the");
         markdown.AppendLine("fastest and slowest process. Allocation is per operation in the same processes.");
+        markdown.AppendLine("A speedup above 1 means the current code is faster.");
         markdown.AppendLine();
-        markdown.AppendLine($"| Payload bytes | Operation | {ComparedManagedVersion} ms (range) | {ComparedManagedVersion} allocated | Current ms (range) | Current allocated | Speedup |");
-        markdown.AppendLine("|---:|---|---:|---:|---:|---:|---:|");
 
-        foreach (var cell in cells)
+        var measuredVersions = ComparedVersions
+            .Where(comparedVersion => measurements.Any(measurement => measurement.CodecVersion == comparedVersion));
+
+        foreach (var comparedVersion in measuredVersions)
         {
-            var published = cell.Where(measurement => measurement.CodecVersion == ComparedManagedVersion).ToArray();
-            var current = cell.Where(measurement => measurement.CodecVersion == LocalVersion).ToArray();
-            var speedup = Median(published) / Median(current);
+            markdown.AppendLine($"### Compared with {comparedVersion}");
+            markdown.AppendLine();
+            markdown.AppendLine($"| Payload bytes | Operation | {comparedVersion} ms (range) | {comparedVersion} allocated | Current ms (range) | Current allocated | Speedup |");
+            markdown.AppendLine("|---:|---|---:|---:|---:|---:|---:|");
 
-            markdown.AppendLine(
-                string.Create(
-                    CultureInfo.InvariantCulture,
-                    $"| {cell.Key.PayloadBytes} | {cell.Key.Operation} | {Describe(published)} | {DescribeAllocation(published)} | {Describe(current)} | {DescribeAllocation(current)} | {speedup:F1}x |"));
+            foreach (var cell in cells)
+            {
+                var compared = cell.Where(measurement => measurement.CodecVersion == comparedVersion).ToArray();
+                var current = cell.Where(measurement => measurement.CodecVersion == LocalVersion).ToArray();
+                var speedup = Median(compared) / Median(current);
+
+                markdown.AppendLine(
+                    string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"| {cell.Key.PayloadBytes} | {cell.Key.Operation} | {Describe(compared)} | {DescribeAllocation(compared)} | {Describe(current)} | {DescribeAllocation(current)} | {speedup:G3}x |"));
+            }
+
+            markdown.AppendLine();
         }
+    }
 
-        markdown.AppendLine();
+    private static CompatibilityReport[] FindComparedReports(CompatibilityReport[] reports)
+    {
+        return ComparedVersions
+            .Select(comparedVersion => reports.Single(report => report.CodecVersion == comparedVersion))
+            .ToArray();
     }
 
     private static string Describe(PerformanceResult[] measurements)

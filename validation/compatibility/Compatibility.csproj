@@ -11,8 +11,8 @@
     <IsPackable>false</IsPackable>
     <DefaultItemExcludes>$(DefaultItemExcludes);artifacts/**</DefaultItemExcludes>
     <CodecVersion Condition="'$(CodecVersion)' == ''">local</CodecVersion>
-    <DefineConstants Condition="'$(CodecVersion)' != 'local'">$(DefineConstants);PUBLISHED_CODEC</DefineConstants>
-    <DefineConstants Condition="'$(CodecVersion)' == 'local' Or '$(CodecVersion)' == '2.0.0'">$(DefineConstants);MANAGED_BYTE_API</DefineConstants>
+    <DefineConstants Condition="'$(CodecVersion)' != 'local' And '$(CodecVersion)' != '3.0.0'">$(DefineConstants);LEGACY_BUFFER_API</DefineConstants>
+    <DefineConstants Condition="'$(CodecVersion)' == 'local' Or '$(CodecVersion)' == '2.0.0' Or '$(CodecVersion)' == '3.0.0'">$(DefineConstants);MANAGED_BYTE_API</DefineConstants>
     <DefineConstants Condition="'$(CodecVersion)' == '1.1.0' Or '$(CodecVersion)' == '1.2.0' Or '$(CodecVersion)' == '1.2.1' Or '$(CodecVersion)' == '1.3.0' Or '$(CodecVersion)' == '1.4.0'">$(DefineConstants);SIGNED_MANAGED_ENCODE</DefineConstants>
   </PropertyGroup>
   <ItemGroup Condition="'$(CodecVersion)' == 'local'">

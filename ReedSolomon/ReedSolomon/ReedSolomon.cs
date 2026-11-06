@@ -22,6 +22,9 @@ public sealed class ReedSolomon
     private static readonly ConcurrentDictionary<(int DataShardCount, int ParityShardCount), byte[][]> ParityMatrixCache =
         new();
 
+    // The indices 0 to 255 in order. Slices of it select the data or parity shards of any codec without allocating.
+    private static readonly int[] ShardIndexSequence = Enumerable.Range(0, Galois.FIELD_SIZE).ToArray();
+
     internal static readonly byte[][] MultiplicationTables = ShardCoding.MultiplicationTables;
 
     internal bool SimdEnabled
@@ -177,11 +180,44 @@ public sealed class ReedSolomon
     /// <summary>Overwrites all parity bytes using equal-sized, nonempty caller-owned shards.</summary>
     public void EncodeParity(byte[][] shards)
     {
-        ValidateShards(shards);
-        CombineRows(
+        if (shards is null)
+        {
+            throw new ArgumentNullException(nameof(shards));
+        }
+
+        EncodeParityCore(new ArrayShardBuffers(shards));
+    }
+
+    /// <summary>Overwrites all parity ranges using equal-length, nonempty caller memory ranges.</summary>
+    /// <remarks>
+    /// Pass one range per shard, the data shards first and then the parity shards. A range may be a slice of a
+    /// larger buffer at any offset, so one set of buffers sized for the longest shard serves every shorter one.
+    /// A parity range must not overlap any other range. Bytes outside the ranges stay unchanged. The parity
+    /// bytes are identical to those of the array overload. Once warm, this method does not allocate.
+    /// </remarks>
+    public void EncodeParity(Memory<byte>[] shards)
+    {
+        if (shards is null)
+        {
+            throw new ArgumentNullException(nameof(shards));
+        }
+
+        EncodeParityCore(new MemoryShardBuffers(shards));
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void EncodeParityCore<TShards>(TShards shards)
+        where TShards : struct, IShardBuffers
+    {
+        var shardLength = ValidateShards(shards);
+
+        ShardCoding.CombineRows(
+            this,
             parityCoefficientRows,
-            shards.AsSpan(0, dataShardCount),
-            shards.AsSpan(dataShardCount, parityShardCount));
+            shards,
+            ShardIndexSequence.AsSpan(0, dataShardCount),
+            ShardIndexSequence.AsSpan(dataShardCount, parityShardCount),
+            shardLength);
     }
 
     /// <summary>Restores null data shards and joins the data, removing the specified padding.</summary>
@@ -207,41 +243,71 @@ public sealed class ReedSolomon
             throw new ArgumentNullException(nameof(workspace));
         }
 
-        ValidateShards(shards);
-        ValidateWorkspace(shards, present, workspace);
+        if (shards is null)
+        {
+            throw new ArgumentNullException(nameof(shards));
+        }
+
+        ReconstructDataCore(new ArrayShardBuffers(shards), present, workspace);
+    }
+
+    /// <summary>Restores missing data into preallocated memory ranges using explicit presence flags.</summary>
+    /// <remarks>
+    /// The ranges follow the rules of <see cref="EncodeParity(Memory{byte}[])"/>. Only the ranges of missing data
+    /// shards are written, and their previous contents do not matter. The flags and the parity ranges stay
+    /// unchanged. A missing data range must not overlap any other range. Once warm, this method does not allocate.
+    /// </remarks>
+    public void ReconstructDataInto(Memory<byte>[] shards, ReadOnlySpan<bool> present, DecodeWorkspace workspace)
+    {
+        if (workspace is null)
+        {
+            throw new ArgumentNullException(nameof(workspace));
+        }
+
+        if (shards is null)
+        {
+            throw new ArgumentNullException(nameof(shards));
+        }
+
+        ReconstructDataCore(new MemoryShardBuffers(shards), present, workspace);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void ReconstructDataCore<TShards>(TShards shards, ReadOnlySpan<bool> present, DecodeWorkspace workspace)
+        where TShards : struct, IShardBuffers
+    {
+        var shardLength = ValidateShards(shards);
+
+        ValidateWorkspace(shards.Count, present, workspace);
         ValidateMissingDataBuffers(shards, present);
 
         var reconstructionPlan = GetReconstructionPlan(present, workspace);
 
-        if (reconstructionPlan.MissingDataIndices.Length == 0)
-        {
-            return;
-        }
-
-        workspace.BindBuffers(shards, reconstructionPlan);
-        CombineRows(
+        ShardCoding.CombineRows(
+            this,
             reconstructionPlan.CoefficientRows,
-            workspace.Inputs,
-            workspace.Outputs.AsSpan(0, reconstructionPlan.MissingDataIndices.Length));
-
-        workspace.ReleaseBuffers();
+            shards,
+            reconstructionPlan.InputShardIndices,
+            reconstructionPlan.MissingDataIndices,
+            shardLength);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void ValidateWorkspace(byte[][] shards, ReadOnlySpan<bool> present, DecodeWorkspace workspace)
+    private void ValidateWorkspace(int shardCount, ReadOnlySpan<bool> present, DecodeWorkspace workspace)
     {
-        var hasIncompatibleWorkspace = present.Length != shards.Length
-            || workspace.Inputs.Length != dataShardCount
-            || workspace.Outputs.Length != parityShardCount;
+        var hasIncompatibleWorkspace = present.Length != shardCount
+            || workspace.DataShardCount != dataShardCount
+            || workspace.ParityShardCount != parityShardCount;
 
         if (hasIncompatibleWorkspace)
         {
-            throw CreateWorkspaceMismatchException(shards, present, workspace);
+            throw CreateWorkspaceMismatchException(shardCount, present, workspace);
         }
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void ValidateMissingDataBuffers(byte[][] shards, ReadOnlySpan<bool> present)
+    private void ValidateMissingDataBuffers<TShards>(TShards shards, ReadOnlySpan<bool> present)
+        where TShards : struct, IShardBuffers
     {
         for (var shardIndex = 0; shardIndex < dataShardCount; shardIndex++)
         {
@@ -250,14 +316,11 @@ public sealed class ReedSolomon
                 continue;
             }
 
-            for (var otherShardIndex = 0; otherShardIndex < shards.Length; otherShardIndex++)
-            {
-                var targetAliasesAnotherShard = shardIndex != otherShardIndex && ReferenceEquals(shards[shardIndex], shards[otherShardIndex]);
+            var sharedShardIndex = shards.FindSharedShard(shardIndex, shards.Count);
 
-                if (targetAliasesAnotherShard)
-                {
-                    throw CreateBufferSharingException(shardIndex, otherShardIndex);
-                }
+            if (sharedShardIndex >= 0)
+            {
+                throw CreateBufferSharingException(shardIndex, sharedShardIndex);
             }
         }
     }
@@ -284,63 +347,63 @@ public sealed class ReedSolomon
         return reconstructionPlan;
     }
 
-    private void ValidateShards(byte[][] shards)
+    /// <returns>The common length of all shards.</returns>
+    private int ValidateShards<TShards>(TShards shards)
+        where TShards : struct, IShardBuffers
     {
-        if (shards is null)
-        {
-            throw new ArgumentNullException(nameof(shards));
-        }
+        var expectedShardCount = dataShardCount + parityShardCount;
 
-        var hasInvalidShards = shards.Length != dataShardCount + parityShardCount || shards[0] is null || shards[0].Length == 0;
-
-        if (hasInvalidShards)
+        if (shards.Count != expectedShardCount)
         {
             throw new ArgumentException(
-                $"Expected {dataShardCount + parityShardCount} shards starting with a nonempty shard, but got {shards.Length} shards.");
+                $"Expected {expectedShardCount} shards ({dataShardCount} data and {parityShardCount} parity), but got {shards.Count}.");
         }
 
-        var shardLength = shards[0].Length;
+        var shardLength = shards.GetShardLength(0);
 
-        for (var shardIndex = 0; shardIndex < shards.Length; shardIndex++)
+        if (shardLength == 0)
         {
-            var shard = shards[shardIndex];
-            var hasInvalidShardLength = shard is null || shard.Length != shardLength;
+            throw new ArgumentException("Shard 0 must exist and contain at least one byte, but it is missing or empty.");
+        }
 
-            if (hasInvalidShardLength)
+        for (var shardIndex = 1; shardIndex < shards.Count; shardIndex++)
+        {
+            var actualShardLength = shards.GetShardLength(shardIndex);
+
+            if (actualShardLength != shardLength)
             {
-                throw new ArgumentException($"Shard {shardIndex} must exist and have {shardLength} bytes like the first shard.");
+                throw new ArgumentException(
+                    $"Shard {shardIndex} must exist and have {shardLength} bytes like shard 0, but has {actualShardLength} bytes.");
             }
         }
 
-        // Read-only data shards may alias, but a writable parity buffer may not.
-        for (var parityShardIndex = dataShardCount; parityShardIndex < shards.Length; parityShardIndex++)
+        // Read-only data shards may share memory, but a writable parity shard may not.
+        // Comparing with lower indices only checks every pair of shards once.
+        for (var parityShardIndex = dataShardCount; parityShardIndex < shards.Count; parityShardIndex++)
         {
-            for (var otherShardIndex = 0; otherShardIndex < parityShardIndex; otherShardIndex++)
+            var sharedShardIndex = shards.FindSharedShard(parityShardIndex, parityShardIndex);
+
+            if (sharedShardIndex >= 0)
             {
-                if (ReferenceEquals(shards[parityShardIndex], shards[otherShardIndex]))
-                {
-                    throw CreateBufferSharingException(parityShardIndex, otherShardIndex);
-                }
+                throw CreateBufferSharingException(parityShardIndex, sharedShardIndex);
             }
         }
+
+        return shardLength;
     }
 
     // These messages stay outside the inlined validation so successful calls do not carry their formatting code.
-    private ArgumentException CreateWorkspaceMismatchException(byte[][] shards, ReadOnlySpan<bool> present, DecodeWorkspace workspace)
+    private ArgumentException CreateWorkspaceMismatchException(int shardCount, ReadOnlySpan<bool> present, DecodeWorkspace workspace)
     {
         return new ArgumentException(
-            $"Expected {shards.Length} presence flags and a workspace for {dataShardCount} data and {parityShardCount} parity shards, "
-            + $"but got {present.Length} flags and a workspace for {workspace.Inputs.Length} data and {workspace.Outputs.Length} parity shards.");
+            $"Expected {shardCount} presence flags and a workspace for {dataShardCount} data and {parityShardCount} parity shards, "
+            + $"but got {present.Length} flags and a workspace for {workspace.DataShardCount} data and {workspace.ParityShardCount} parity shards.");
     }
 
     private static ArgumentException CreateBufferSharingException(int shardIndex, int otherShardIndex)
     {
-        return new ArgumentException($"Writable shard {shardIndex} must not share its buffer with shard {otherShardIndex}.");
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal void CombineRows(byte[][] coefficients, ReadOnlySpan<byte[]> inputs, ReadOnlySpan<byte[]> outputs)
-    {
-        ShardCoding.CombineRows(this, coefficients, inputs, outputs);
+        return new ArgumentException(
+            $"Writable shard {shardIndex} must not share its buffer with shard {otherShardIndex}. "
+            + "Every writable shard needs its own memory that overlaps no other shard.");
     }
 }

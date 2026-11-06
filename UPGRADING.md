@@ -14,6 +14,18 @@ Every statement about behavior and data in this guide is measured with
 each published package and against the current code. Run `bash validation/compatibility/run.sh` to
 repeat them. The replacement code below is covered by `ReedSolomonTests/UpgradeGuideTests.cs`.
 
+## From 3.0 to 3.1
+
+Version 3.1 only adds methods. Code written for 3.0 keeps working, and the shard bytes do not
+change. `EncodeParity` and `ReconstructDataInto` gained overloads for `Memory<byte>[]`, so one set
+of buffers can serve shards of different lengths and the codec can write behind a header. The
+README section [Memory ranges](https://github.com/Witteborn/ReedSolomon/blob/master/README.md#memory-ranges)
+shows how to use them.
+
+A call that passes the literal `null`, such as `codec.EncodeParity(null)`, no longer compiles
+because two overloads match. Such a call only throws `ArgumentNullException`. Remove it, or cast
+the argument to `byte[][]`.
+
 ## Data
 
 | Question | Answer |

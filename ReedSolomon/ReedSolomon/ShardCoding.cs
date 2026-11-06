@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
@@ -22,37 +23,86 @@ internal static class ShardCoding
     private static readonly Vector256<byte>[] LowNibbleTables = BuildNibbleTables(useHighNibble: false);
     private static readonly Vector256<byte>[] HighNibbleTables = BuildNibbleTables(useHighNibble: true);
 
+    /// <summary>Writes one combination of the selected input shards into each selected output shard.</summary>
+    /// <remarks>
+    /// Callers validate that all shards have <paramref name="shardLength"/> bytes and that no output shares memory
+    /// with another shard. The vector loops rely on that length without bounds checks.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static void CombineRows(
+    internal static void CombineRows<TShards>(
         ReedSolomon codec,
         byte[][] coefficients,
-        ReadOnlySpan<byte[]> inputShards,
-        ReadOnlySpan<byte[]> outputShards)
+        TShards shards,
+        ReadOnlySpan<int> inputShardIndices,
+        ReadOnlySpan<int> outputShardIndices,
+        int shardLength)
+        where TShards : struct, IShardBuffers
     {
         const int pairedOutputCount = 2;
 
-        var canUseAvx2Pair = codec.SimdEnabled && Avx2.IsSupported && outputShards.Length == pairedOutputCount;
+        var canUseAvx2Pair = codec.SimdEnabled && Avx2.IsSupported && outputShardIndices.Length == pairedOutputCount;
 
         if (canUseAvx2Pair)
         {
-            CombineTwoAvx2(codec, coefficients[0], coefficients[1], inputShards, outputShards[0], outputShards[1]);
+            CombineTwoAvx2(
+                codec, coefficients[0], coefficients[1],
+                shards, inputShardIndices,
+                GetValidatedShard(shards, outputShardIndices[0], shardLength),
+                GetValidatedShard(shards, outputShardIndices[1], shardLength));
 
             return;
         }
 
-        var canUseArm64Pair = codec.SimdEnabled && AdvSimd.Arm64.IsSupported && outputShards.Length == pairedOutputCount;
+        var canUseArm64Pair = codec.SimdEnabled && AdvSimd.Arm64.IsSupported && outputShardIndices.Length == pairedOutputCount;
 
         if (canUseArm64Pair)
         {
-            CombineTwoNeon(coefficients[0], coefficients[1], inputShards, outputShards[0], outputShards[1], codec.BlockSizeBytes);
+            CombineTwoNeon(
+                coefficients[0], coefficients[1],
+                shards, inputShardIndices,
+                GetValidatedShard(shards, outputShardIndices[0], shardLength),
+                GetValidatedShard(shards, outputShardIndices[1], shardLength),
+                codec.BlockSizeBytes);
 
             return;
         }
 
-        for (var outputIndex = 0; outputIndex < outputShards.Length; outputIndex++)
+        for (var outputIndex = 0; outputIndex < outputShardIndices.Length; outputIndex++)
         {
-            CombineRow(coefficients[outputIndex], inputShards, outputShards[outputIndex], codec.BlockSizeBytes, codec.SimdEnabled);
+            CombineRow(
+                coefficients[outputIndex],
+                shards,
+                inputShardIndices,
+                GetValidatedShard(shards, outputShardIndices[outputIndex], shardLength),
+                codec.BlockSizeBytes,
+                codec.SimdEnabled);
         }
+    }
+
+    // Validation ran before, but the caller may still replace a shard in its array from another thread.
+    // Checking each shard when it is fetched keeps every unchecked vector access inside that shard.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Span<byte> GetValidatedShard<TShards>(TShards shards, int shardIndex, int shardLength)
+        where TShards : struct, IShardBuffers
+    {
+        var shard = shards.GetShard(shardIndex);
+
+        if (shard.Length != shardLength)
+        {
+            ThrowShardChanged(shardIndex, shardLength, shard.Length);
+        }
+
+        return shard;
+    }
+
+    // Deliberately not marked NoInlining. The JIT then sees that this method never returns and keeps it
+    // out of the register allocation of the vector loops. With NoInlining, arrays became 27 % slower.
+    [DoesNotReturn]
+    private static void ThrowShardChanged(int shardIndex, int shardLength, int actualShardLength)
+    {
+        throw new InvalidOperationException(
+            $"Shard {shardIndex} changed during the call. It was validated with {shardLength} bytes but now has "
+            + $"{actualShardLength} bytes. Shards must not be replaced while the codec uses them.");
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -89,102 +139,168 @@ internal static class ShardCoding
         secondProduct.StoreUnsafe(ref secondDestination, (nuint)byteOffset);
     }
 
-    private static void CombineTwoNeon(
+    private static void CombineTwoNeon<TShards>(
         byte[] firstCoefficientRow,
         byte[] secondCoefficientRow,
-        ReadOnlySpan<byte[]> inputShards,
-        byte[] firstOutput,
-        byte[] secondOutput,
+        TShards shards,
+        ReadOnlySpan<int> inputShardIndices,
+        Span<byte> firstOutput,
+        Span<byte> secondOutput,
         int blockSizeBytes)
+        where TShards : struct, IShardBuffers
     {
-        var nibbleMask = Vector128.Create((byte)LowNibbleMask);
+        var keepsVectorLoopOutOfLine = typeof(TShards) == typeof(MemoryShardBuffers);
+        var shardLength = firstOutput.Length;
+        ref var firstDestination = ref MemoryMarshal.GetReference(firstOutput);
+        ref var secondDestination = ref MemoryMarshal.GetReference(secondOutput);
 
-        for (var blockStart = 0; blockStart < firstOutput.Length; blockStart += blockSizeBytes)
+        for (var blockStart = 0; blockStart < shardLength; blockStart += blockSizeBytes)
         {
-            var blockEnd = Math.Min(firstOutput.Length, blockStart + blockSizeBytes);
+            var blockEnd = Math.Min(shardLength, blockStart + blockSizeBytes);
 
-            for (var inputIndex = 0; inputIndex < inputShards.Length; inputIndex++)
+            for (var inputIndex = 0; inputIndex < inputShardIndices.Length; inputIndex++)
             {
-                var firstLowNibbleTable = LowNibbleTables[firstCoefficientRow[inputIndex]].GetLower();
-                var firstHighNibbleTable = HighNibbleTables[firstCoefficientRow[inputIndex]].GetLower();
-                var secondLowNibbleTable = LowNibbleTables[secondCoefficientRow[inputIndex]].GetLower();
-                var secondHighNibbleTable = HighNibbleTables[secondCoefficientRow[inputIndex]].GetLower();
-                ref var source = ref MemoryMarshal.GetArrayDataReference(inputShards[inputIndex]);
-                ref var firstDestination = ref MemoryMarshal.GetArrayDataReference(firstOutput);
-                ref var secondDestination = ref MemoryMarshal.GetArrayDataReference(secondOutput);
-                var byteOffset = blockStart;
+                var firstCoefficient = firstCoefficientRow[inputIndex];
+                var secondCoefficient = secondCoefficientRow[inputIndex];
+                ref var source = ref MemoryMarshal.GetReference(GetValidatedShard(shards, inputShardIndices[inputIndex], shardLength));
 
-                byteOffset = MultiplyArm64Vectors(
-                    ref source, ref firstDestination, ref secondDestination,
-                    byteOffset, blockEnd,
-                    firstLowNibbleTable, firstHighNibbleTable,
-                    secondLowNibbleTable, secondHighNibbleTable,
-                    nibbleMask, inputIndex);
-
-                for (; byteOffset < blockEnd; byteOffset++)
+                if (keepsVectorLoopOutOfLine)
                 {
-                    var firstProduct = MultiplicationTables[firstCoefficientRow[inputIndex]][inputShards[inputIndex][byteOffset]];
-                    var secondProduct = MultiplicationTables[secondCoefficientRow[inputIndex]][inputShards[inputIndex][byteOffset]];
-
-                    if (inputIndex == 0)
-                    {
-                        firstOutput[byteOffset] = firstProduct;
-                        secondOutput[byteOffset] = secondProduct;
-                    }
-                    else
-                    {
-                        firstOutput[byteOffset] ^= firstProduct;
-                        secondOutput[byteOffset] ^= secondProduct;
-                    }
+                    MultiplyAddPairBlockNeonOutOfLine(
+                        firstCoefficient, secondCoefficient, ref source, inputIndex,
+                        ref firstDestination, ref secondDestination, blockStart, blockEnd);
+                }
+                else
+                {
+                    MultiplyAddPairBlockNeon(
+                        firstCoefficient, secondCoefficient, ref source, inputIndex,
+                        ref firstDestination, ref secondDestination, blockStart, blockEnd);
                 }
             }
         }
     }
 
-    private static void CombineTwoAvx2(
+    private static void CombineTwoAvx2<TShards>(
         ReedSolomon codec,
         byte[] firstCoefficientRow,
         byte[] secondCoefficientRow,
-        ReadOnlySpan<byte[]> inputShards,
-        byte[] firstOutput,
-        byte[] secondOutput)
+        TShards shards,
+        ReadOnlySpan<int> inputShardIndices,
+        Span<byte> firstOutput,
+        Span<byte> secondOutput)
+        where TShards : struct, IShardBuffers
     {
-        var nibbleMask = Vector256.Create((byte)LowNibbleMask);
-        ref var firstDestination = ref MemoryMarshal.GetArrayDataReference(firstOutput);
-        ref var secondDestination = ref MemoryMarshal.GetArrayDataReference(secondOutput);
+        var keepsVectorLoopOutOfLine = typeof(TShards) == typeof(MemoryShardBuffers);
+        var shardLength = firstOutput.Length;
+        ref var firstDestination = ref MemoryMarshal.GetReference(firstOutput);
+        ref var secondDestination = ref MemoryMarshal.GetReference(secondOutput);
 
-        for (var blockStart = 0; blockStart < firstOutput.Length; blockStart += codec.BlockSizeBytes)
+        for (var blockStart = 0; blockStart < shardLength; blockStart += codec.BlockSizeBytes)
         {
-            var blockEnd = Math.Min(firstOutput.Length, blockStart + codec.BlockSizeBytes);
+            var blockEnd = Math.Min(shardLength, blockStart + codec.BlockSizeBytes);
 
-            for (var inputIndex = 0; inputIndex < inputShards.Length; inputIndex++)
+            for (var inputIndex = 0; inputIndex < inputShardIndices.Length; inputIndex++)
             {
                 var firstCoefficient = firstCoefficientRow[inputIndex];
                 var secondCoefficient = secondCoefficientRow[inputIndex];
-                var firstLowNibbleTable = LowNibbleTables[firstCoefficient];
-                var firstHighNibbleTable = HighNibbleTables[firstCoefficient];
-                var secondLowNibbleTable = LowNibbleTables[secondCoefficient];
-                var secondHighNibbleTable = HighNibbleTables[secondCoefficient];
-                ref var source = ref MemoryMarshal.GetArrayDataReference(inputShards[inputIndex]);
-                var byteOffset = blockStart;
+                ref var source = ref MemoryMarshal.GetReference(GetValidatedShard(shards, inputShardIndices[inputIndex], shardLength));
 
-                byteOffset = MultiplyAvx2Vectors(
-                    ref source, ref firstDestination, ref secondDestination,
-                    byteOffset, blockEnd,
-                    firstLowNibbleTable, firstHighNibbleTable,
-                    secondLowNibbleTable, secondHighNibbleTable,
-                    nibbleMask, inputIndex, codec.UnrollFactor);
-
-                MultiplyScalarRemainder(
-                    firstCoefficient, secondCoefficient,
-                    inputShards, inputIndex, firstOutput, secondOutput,
-                    byteOffset, blockEnd);
+                if (keepsVectorLoopOutOfLine)
+                {
+                    MultiplyAddPairBlockAvx2OutOfLine(
+                        firstCoefficient, secondCoefficient, ref source, inputIndex,
+                        ref firstDestination, ref secondDestination, blockStart, blockEnd, codec.UnrollFactor);
+                }
+                else
+                {
+                    MultiplyAddPairBlockAvx2(
+                        firstCoefficient, secondCoefficient, ref source, inputIndex,
+                        ref firstDestination, ref secondDestination, blockStart, blockEnd, codec.UnrollFactor);
+                }
             }
         }
     }
 
-    private static void CombineRow(byte[] coefficients, ReadOnlySpan<byte[]> inputShards, byte[] output,
-        int blockSizeBytes, bool simdEnabled)
+    // Memory<T>.Span inlines enough code into the generic callers that the JIT moved the destination
+    // pointers of the vector loop to the stack, which made 6 KiB shards about 30 % slower. Memory ranges
+    // therefore call the vector loop out of line. Arrays keep it inline because a call per input slows
+    // down small shards. The typeof check is a constant for each struct instantiation.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void MultiplyAddPairBlockNeonOutOfLine(
+        byte firstCoefficient, byte secondCoefficient,
+        ref byte source, int inputIndex,
+        ref byte firstDestination, ref byte secondDestination,
+        int blockStart, int blockEnd)
+    {
+        MultiplyAddPairBlockNeon(
+            firstCoefficient, secondCoefficient, ref source, inputIndex,
+            ref firstDestination, ref secondDestination, blockStart, blockEnd);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void MultiplyAddPairBlockAvx2OutOfLine(
+        byte firstCoefficient, byte secondCoefficient,
+        ref byte source, int inputIndex,
+        ref byte firstDestination, ref byte secondDestination,
+        int blockStart, int blockEnd, int unrollFactor)
+    {
+        MultiplyAddPairBlockAvx2(
+            firstCoefficient, secondCoefficient, ref source, inputIndex,
+            ref firstDestination, ref secondDestination, blockStart, blockEnd, unrollFactor);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void MultiplyAddPairBlockNeon(
+        byte firstCoefficient, byte secondCoefficient,
+        ref byte source, int inputIndex,
+        ref byte firstDestination, ref byte secondDestination,
+        int blockStart, int blockEnd)
+    {
+        var nibbleMask = Vector128.Create((byte)LowNibbleMask);
+
+        var byteOffset = MultiplyArm64Vectors(
+            ref source, ref firstDestination, ref secondDestination,
+            blockStart, blockEnd,
+            LowNibbleTables[firstCoefficient].GetLower(), HighNibbleTables[firstCoefficient].GetLower(),
+            LowNibbleTables[secondCoefficient].GetLower(), HighNibbleTables[secondCoefficient].GetLower(),
+            nibbleMask, inputIndex);
+
+        MultiplyScalarRemainder(
+            firstCoefficient, secondCoefficient,
+            ref source, inputIndex, ref firstDestination, ref secondDestination,
+            byteOffset, blockEnd);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void MultiplyAddPairBlockAvx2(
+        byte firstCoefficient, byte secondCoefficient,
+        ref byte source, int inputIndex,
+        ref byte firstDestination, ref byte secondDestination,
+        int blockStart, int blockEnd, int unrollFactor)
+    {
+        var nibbleMask = Vector256.Create((byte)LowNibbleMask);
+
+        var byteOffset = MultiplyAvx2Vectors(
+            ref source, ref firstDestination, ref secondDestination,
+            blockStart, blockEnd,
+            LowNibbleTables[firstCoefficient], HighNibbleTables[firstCoefficient],
+            LowNibbleTables[secondCoefficient], HighNibbleTables[secondCoefficient],
+            nibbleMask, inputIndex, unrollFactor);
+
+        MultiplyScalarRemainder(
+            firstCoefficient, secondCoefficient,
+            ref source, inputIndex, ref firstDestination, ref secondDestination,
+            byteOffset, blockEnd);
+    }
+
+    private static void CombineRow<TShards>(
+        byte[] coefficients,
+        TShards shards,
+        ReadOnlySpan<int> inputShardIndices,
+        Span<byte> output,
+        int blockSizeBytes,
+        bool simdEnabled)
+        where TShards : struct, IShardBuffers
     {
         // Cache-sized spans retain output in cache across coefficient passes.
         // First term assigns; later terms XOR, avoiding a separate output clear.
@@ -196,7 +312,7 @@ internal static class ShardCoding
             {
                 MultiplyAdd(
                     coefficients[inputIndex],
-                    inputShards[inputIndex],
+                    GetValidatedShard(shards, inputShardIndices[inputIndex], output.Length),
                     output,
                     blockStart,
                     blockEnd,
@@ -208,8 +324,8 @@ internal static class ShardCoding
 
     private static void MultiplyAdd(
         byte coefficient,
-        byte[] input,
-        byte[] output,
+        ReadOnlySpan<byte> input,
+        Span<byte> output,
         int blockStart,
         int blockEnd,
         bool accumulate,
@@ -219,7 +335,7 @@ internal static class ShardCoding
         {
             if (accumulate == false)
             {
-                output.AsSpan(blockStart, blockEnd - blockStart).Clear();
+                output.Slice(blockStart, blockEnd - blockStart).Clear();
             }
 
             return;
@@ -429,11 +545,12 @@ internal static class ShardCoding
         return byteOffset;
     }
 
+    // Shard validation keeps every offset below blockEnd inside the shards, like the vector loads before it.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void MultiplyScalarRemainder(
         byte firstCoefficient, byte secondCoefficient,
-        ReadOnlySpan<byte[]> inputShards, int inputIndex,
-        byte[] firstOutput, byte[] secondOutput,
+        ref byte source, int inputIndex,
+        ref byte firstDestination, ref byte secondDestination,
         int byteOffset, int blockEnd)
     {
         var firstMultiplicationTable = MultiplicationTables[firstCoefficient];
@@ -441,18 +558,21 @@ internal static class ShardCoding
 
         for (; byteOffset < blockEnd; byteOffset++)
         {
-            var firstProduct = firstMultiplicationTable[inputShards[inputIndex][byteOffset]];
-            var secondProduct = secondMultiplicationTable[inputShards[inputIndex][byteOffset]];
+            var inputValue = Unsafe.Add(ref source, byteOffset);
+            var firstProduct = firstMultiplicationTable[inputValue];
+            var secondProduct = secondMultiplicationTable[inputValue];
+            ref var firstOutputByte = ref Unsafe.Add(ref firstDestination, byteOffset);
+            ref var secondOutputByte = ref Unsafe.Add(ref secondDestination, byteOffset);
 
             if (inputIndex == 0)
             {
-                firstOutput[byteOffset] = firstProduct;
-                secondOutput[byteOffset] = secondProduct;
+                firstOutputByte = firstProduct;
+                secondOutputByte = secondProduct;
             }
             else
             {
-                firstOutput[byteOffset] ^= firstProduct;
-                secondOutput[byteOffset] ^= secondProduct;
+                firstOutputByte ^= firstProduct;
+                secondOutputByte ^= secondProduct;
             }
         }
     }
@@ -496,16 +616,16 @@ internal static class ShardCoding
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int MultiplySingleOutputAvx2(
-        byte coefficient, byte[] input, byte[] output,
+        byte coefficient, ReadOnlySpan<byte> input, Span<byte> output,
         int byteOffset, int blockEnd, bool accumulate)
     {
         var lowNibbleTable = LowNibbleTables[coefficient];
         var highNibbleTable = HighNibbleTables[coefficient];
         var nibbleMask = Vector256.Create((byte)LowNibbleMask);
-        ref var source = ref MemoryMarshal.GetArrayDataReference(input);
-        ref var destination = ref MemoryMarshal.GetArrayDataReference(output);
+        ref var source = ref MemoryMarshal.GetReference(input);
+        ref var destination = ref MemoryMarshal.GetReference(output);
 
-        // Shard validation keeps every vector load and store inside its buffer.
+        // Shard validation keeps every vector load and store inside its shard range.
         for (; byteOffset <= blockEnd - Avx2VectorSizeBytes; byteOffset += Avx2VectorSizeBytes)
         {
             var value = Vector256.LoadUnsafe(ref source, (nuint)byteOffset);
@@ -529,14 +649,14 @@ internal static class ShardCoding
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int MultiplySingleOutputArm64(
-        byte coefficient, byte[] input, byte[] output,
+        byte coefficient, ReadOnlySpan<byte> input, Span<byte> output,
         int byteOffset, int blockEnd, bool accumulate)
     {
         var lowNibbleTable = LowNibbleTables[coefficient].GetLower();
         var highNibbleTable = HighNibbleTables[coefficient].GetLower();
         var nibbleMask = Vector128.Create((byte)LowNibbleMask);
-        ref var source = ref MemoryMarshal.GetArrayDataReference(input);
-        ref var destination = ref MemoryMarshal.GetArrayDataReference(output);
+        ref var source = ref MemoryMarshal.GetReference(input);
+        ref var destination = ref MemoryMarshal.GetReference(output);
 
         for (; byteOffset <= blockEnd - NeonVectorSizeBytes; byteOffset += NeonVectorSizeBytes)
         {

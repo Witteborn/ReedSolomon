@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using Witteborn.ReedSolomon;
 using Codec = Witteborn.ReedSolomon.ReedSolomon;
 
@@ -77,7 +78,7 @@ public sealed class CodecContractTests
 
         Assert.ThrowsExactly<ArgumentNullException>(() => codec.ManagedEncode(null!));
         Assert.ThrowsExactly<ArgumentNullException>(() => codec.ManagedDecode(null!));
-        Assert.ThrowsExactly<ArgumentNullException>(() => codec.EncodeParity(null!));
+        Assert.ThrowsExactly<ArgumentNullException>(() => codec.EncodeParity((byte[][])null!));
         Assert.ThrowsExactly<ArgumentNullException>(() => codec.ReconstructDataInto(shards, shardPresence, null!));
         Assert.ThrowsExactly<ArgumentException>(() => codec.EncodeParity(shards[..11]));
         Assert.ThrowsExactly<ArgumentException>(() => codec.ManagedDecode(shards[..11]));
@@ -252,18 +253,25 @@ secondLostShardIndex++)
 
         Assert.AreEqual(0L, allocatedBytes, "Warm reconstruction should reuse caller buffers and metadata.");
 
-        foreach (var fieldName in new[]
-        {
-            "Inputs",
-            "Outputs"
-        })
-        {
-            var workspaceBuffers = (byte[][])typeof(DecodeWorkspace).GetField(
-                fieldName,
-                BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(workspace)!;
+        var temporaryShards = ReconstructTemporaryShards(codec, workspace, shardPresence);
 
-            Assert.IsTrue(workspaceBuffers.All(buffer => buffer is null), "Workspace must release payload references.");
-        }
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        Assert.IsFalse(temporaryShards.IsAlive, "Workspace must not keep payload buffers alive after a call.");
+        GC.KeepAlive(workspace);
+    }
+
+    // Kept out of line so no local variable of the test method holds the shards.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference ReconstructTemporaryShards(Codec codec, DecodeWorkspace workspace, bool[] shardPresence)
+    {
+        var shards = codec.ManagedEncode(new byte[StandardDataShardCount * SimdBlockAlignmentBytes]);
+
+        codec.ReconstructDataInto(shards, shardPresence, workspace);
+
+        return new WeakReference(shards);
     }
 
     [TestMethod]

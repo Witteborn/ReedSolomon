@@ -7,7 +7,7 @@ process_rounds="${1:-5}"
 script_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 artifacts=artifacts
 results=results
-versions=(1.0.0 1.1.0 1.2.0 1.2.1 1.3.0 1.4.0 2.0.0 local)
+versions=(1.0.0 1.1.0 1.2.0 1.2.1 1.3.0 1.4.0 2.0.0 3.0.0 local)
 payload_sizes=(4096 16777216 440401920)
 operations=(managed-encode managed-decode2 reuse-encode reuse-decode2)
 
@@ -29,7 +29,8 @@ for version in "${versions[@]}"; do
     probe "$version" report "$results/report-$version.json"
 done
 
-measured_versions=(2.0.0 local)
+measured_versions=(2.0.0 3.0.0 local)
+reversed_versions=(local 3.0.0 2.0.0)
 
 for ((round = 0; round < process_rounds; round++)); do
     for payload_size in "${payload_sizes[@]}"; do
@@ -38,7 +39,7 @@ for ((round = 0; round < process_rounds; round++)); do
             if ((round % 2 == 0)); then
                 order=("${measured_versions[@]}")
             else
-                order=(local 2.0.0)
+                order=("${reversed_versions[@]}")
             fi
 
             for version in "${order[@]}"; do
@@ -48,11 +49,14 @@ for ((round = 0; round < process_rounds; round++)); do
     done
 done
 
-# The SDK's package validation lists every public API difference to the published package.
-dotnet pack ../../ReedSolomon/ReedSolomon/ReedSolomon.csproj -c Release --nologo --verbosity quiet \
-    -o "$artifacts/package" -p:GeneratePackageOnBuild=false \
-    -p:EnablePackageValidation=true -p:PackageValidationBaselineVersion=2.0.0 \
-    -p:GenerateCompatibilitySuppressionFile=true \
-    "-p:ApiCompatSuppressionOutputFile=$absolute_results/api-differences-to-2.0.0.xml"
+# The SDK's package validation lists every public API difference to a published package.
+# No file is written when there is no difference.
+for baseline_version in 2.0.0 3.0.0; do
+    dotnet pack ../../ReedSolomon/ReedSolomon/ReedSolomon.csproj -c Release --nologo --verbosity quiet \
+        -o "$artifacts/package-$baseline_version" -p:GeneratePackageOnBuild=false \
+        -p:EnablePackageValidation=true "-p:PackageValidationBaselineVersion=$baseline_version" \
+        -p:GenerateCompatibilitySuppressionFile=true \
+        "-p:ApiCompatSuppressionOutputFile=$absolute_results/api-differences-to-$baseline_version.xml"
+done
 
 probe local compare "$results" "$results/COMPATIBILITY.md"

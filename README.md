@@ -94,10 +94,41 @@ parity, call `EncodeParity` once all data shards are restored. Two shards must n
 
 Once warm, `EncodeParity` and `ReconstructDataInto` do not allocate.
 
+### Memory ranges
+
+When shard lengths change from one chunk to the next, pass `Memory<byte>` ranges instead of whole
+arrays. A range may start at any offset of a larger buffer. One set of buffers sized for the longest
+shard therefore serves every shorter shard, and the codec can write behind a header without copying.
+
+```csharp
+const int headerSizeBytes = 1;
+const int maximumShardLengthBytes = 1_700_000;
+
+// Allocate once for the longest shard, plus the header that precedes each stored shard.
+var storedShards = Enumerable.Range(0, shardCount)
+    .Select(_ => new byte[headerSizeBytes + maximumShardLengthBytes])
+    .ToArray();
+
+// For each chunk, select ranges of the current shard length behind the header.
+var shardLength = 1_234_567;
+var ranges = storedShards
+    .Select(storedShard => storedShard.AsMemory(headerSizeBytes, shardLength))
+    .ToArray();
+
+// Fill the data ranges, including zero padding, then encode or reconstruct.
+codec.EncodeParity(ranges);
+codec.ReconstructDataInto(ranges, shardPresence, workspace);
+```
+
+The rules of the array overloads apply to every range, and the shard bytes are identical. Bytes
+outside the ranges stay unchanged. A range that the codec writes must not overlap any other range.
+Data ranges still hold the bytes of the previous chunk, so clear the padding before encoding.
+
 ## Concurrency
 
 A codec can be shared by several threads that use separate buffers. Every concurrent worker needs its
-own `DecodeWorkspace` with the codec's shard counts.
+own `DecodeWorkspace` with the codec's shard counts. Replacing a shard with one of another length while a
+call is running throws `InvalidOperationException`, and the codec never touches memory outside the shards.
 
 ## Performance and tuning
 

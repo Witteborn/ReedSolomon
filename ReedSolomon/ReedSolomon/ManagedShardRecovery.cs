@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace Witteborn.ReedSolomon;
 
 /// <summary>Validates, restores and joins shards for the allocating API.</summary>
@@ -79,50 +81,56 @@ internal static class ManagedShardRecovery
         var inverse = ReconstructionPlanner.CreateRecoveryInverse(
             information.MissingDataIndices, information.AvailableParityIndices, parityCoefficientRows);
 
-        var (inputShards, dataIndices, parityStart) = GatherInputs(shards, information, dataShardCount);
-        var (coefficientRows, restoredShards) = CreateRecoveryBuffers(
+        var (inputShardIndices, dataIndices, parityStart) = GatherInputs(shards, information, dataShardCount);
+        var coefficientRows = CreateRecoveryCoefficients(
             inverse, information, dataIndices, parityStart, dataShardCount, parityCoefficientRows);
+        var missingDataIndices = CollectionsMarshal.AsSpan(information.MissingDataIndices);
 
-        codec.CombineRows(coefficientRows, inputShards, restoredShards);
-
-        for (var missingIndex = 0; missingIndex < information.MissingDataIndices.Count; missingIndex++)
+        // Every restored byte is written by the first coefficient pass.
+        foreach (var missingShardIndex in missingDataIndices)
         {
-            shards[information.MissingDataIndices[missingIndex]] = restoredShards[missingIndex];
+            shards[missingShardIndex] = GC.AllocateUninitializedArray<byte>(information.ShardLength);
         }
+
+        ShardCoding.CombineRows(
+            codec,
+            coefficientRows,
+            new ArrayShardBuffers(shards),
+            inputShardIndices,
+            missingDataIndices,
+            information.ShardLength);
     }
 
-    private static (byte[][] Shards, int[] DataIndices, int ParityStart) GatherInputs(
+    private static (int[] InputShardIndices, int[] DataIndices, int ParityStart) GatherInputs(
         byte[]?[] shards,
         ManagedShardInfo information,
         int dataShardCount)
     {
         var missingShardCount = information.MissingDataIndices.Count;
-        var inputShards = new byte[dataShardCount][];
+        var inputShardIndices = new int[dataShardCount];
         var dataIndices = new int[dataShardCount - missingShardCount];
         var nextInputIndex = 0;
 
         for (var dataShardIndex = 0; dataShardIndex < dataShardCount; dataShardIndex++)
         {
-            var dataShard = shards[dataShardIndex];
-
-            if (dataShard is null)
+            if (shards[dataShardIndex] is null)
             {
                 continue;
             }
 
             dataIndices[nextInputIndex] = dataShardIndex;
-            inputShards[nextInputIndex++] = dataShard;
+            inputShardIndices[nextInputIndex++] = dataShardIndex;
         }
 
         for (var parityIndex = 0; parityIndex < missingShardCount; parityIndex++)
         {
-            inputShards[nextInputIndex + parityIndex] = shards[dataShardCount + information.AvailableParityIndices[parityIndex]]!;
+            inputShardIndices[nextInputIndex + parityIndex] = dataShardCount + information.AvailableParityIndices[parityIndex];
         }
 
-        return (inputShards, dataIndices, nextInputIndex);
+        return (inputShardIndices, dataIndices, nextInputIndex);
     }
 
-    private static (byte[][] Coefficients, byte[][] RestoredShards) CreateRecoveryBuffers(
+    private static byte[][] CreateRecoveryCoefficients(
         Matrix inverse,
         ManagedShardInfo information,
         int[] dataIndices,
@@ -132,7 +140,6 @@ internal static class ManagedShardRecovery
     {
         var missingShardCount = information.MissingDataIndices.Count;
         var coefficientRows = new byte[missingShardCount][];
-        var restoredShards = new byte[missingShardCount][];
 
         for (var missingIndex = 0; missingIndex < missingShardCount; missingIndex++)
         {
@@ -141,14 +148,13 @@ internal static class ManagedShardRecovery
                 recoveryRow, coefficientValue => unchecked((byte)coefficientValue));
 
             coefficientRows[missingIndex] = new byte[dataShardCount];
-            restoredShards[missingIndex] = GC.AllocateUninitializedArray<byte>(information.ShardLength);
 
             WriteRecoveryCoefficients(
                 coefficientRows[missingIndex], inverseRow, dataIndices,
                 information.AvailableParityIndices, parityCoefficientRows, parityStart);
         }
 
-        return (coefficientRows, restoredShards);
+        return coefficientRows;
     }
 
     private static void WriteRecoveryCoefficients(
